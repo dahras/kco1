@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -27,48 +27,103 @@
   </script>
 
   <style>
+    /* ── DESIGN TOKENS ───────────────────────────────── */
+    :root {
+      --bg:       #f8fafc;
+      --bg-1:     #ffffff;
+      --bg-2:     #f1f5f9;
+      --bg-3:     #e2e8f0;
+      --sidebar:  #f8fafc;
+      --topbar:   #ffffff;
+      --txt:      #0f172a;
+      --txt-2:    #475569;
+      --txt-3:    #94a3b8;
+      --border:   #e2e8f0;
+      --border-2: #cbd5e1;
+      --brand:    #6366f1;
+      --brand-h:  #4f46e5;
+      --brand-bg: rgba(99,102,241,.08);
+      --brand-t:  #4f46e5;
+      --shadow:   0 1px 3px rgba(0,0,0,.08),0 4px 12px rgba(0,0,0,.05);
+    }
+    html.dark {
+      --bg:       #060b17;
+      --bg-1:     #0f172a;
+      --bg-2:     #1e293b;
+      --bg-3:     #334155;
+      --sidebar:  #0a0f1e;
+      --topbar:   #0a0f1e;
+      --txt:      #e2e8f0;
+      --txt-2:    #94a3b8;
+      --txt-3:    #64748b;
+      --border:   #1e293b;
+      --border-2: #334155;
+      --brand:    #6366f1;
+      --brand-h:  #4f46e5;
+      --brand-bg: rgba(99,102,241,.12);
+      --brand-t:  #818cf8;
+      --shadow:   0 1px 3px rgba(0,0,0,.4),0 4px 16px rgba(0,0,0,.3);
+    }
+
+    /* ── RESET & BASE ────────────────────────────────── */
     *,*::before,*::after{box-sizing:border-box}
-    html,body{font-family:'Inter',system-ui,sans-serif;height:100%;margin:0}
+    html,body{font-family:'Inter',system-ui,sans-serif;height:100%;margin:0;background:var(--bg);color:var(--txt);transition:background .2s,color .2s}
     ::-webkit-scrollbar{width:5px;height:5px}
     ::-webkit-scrollbar-track{background:transparent}
-    ::-webkit-scrollbar-thumb{background:#94a3b8;border-radius:3px}
-    .dark ::-webkit-scrollbar-thumb{background:#475569}
-    @keyframes recPulse{0%,100%{opacity:1}50%{opacity:.35}}
+    ::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:3px}
+
+    /* ── ANIMATIONS ──────────────────────────────────── */
     @keyframes fadeSlide{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes blink{0%,100%{background:#ef4444}50%{background:#fca5a5}}
     .rec-dot{width:9px;height:9px;border-radius:50%;background:#ef4444;animation:blink 1.2s ease-in-out infinite}
     .fade-slide{animation:fadeSlide .25s ease-out}
     .spinner{animation:spin 1s linear infinite}
-    .sidebar-item{display:flex;align-items:center;gap:10px;padding:9px 14px;border-radius:10px;cursor:pointer;font-size:.875rem;font-weight:500;color:#94a3b8;transition:background .15s,color .15s}
-    .sidebar-item:hover{background:rgba(99,102,241,.08);color:#e2e8f0}
-    .sidebar-item.active{background:rgba(99,102,241,.18);color:#a5b4fc}
-    .inp{width:100%;padding:9px 13px;border-radius:9px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:.875rem;outline:none;transition:border-color .15s}
-    .inp:focus{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.15)}
-    .inp-light{background:#f8fafc;border-color:#e2e8f0;color:#0f172a}
-    .btn{display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border-radius:9px;font-size:.875rem;font-weight:600;cursor:pointer;border:none;transition:all .15s;white-space:nowrap}
-    .btn-primary{background:#6366f1;color:#fff}
-    .btn-primary:hover{background:#4f46e5}
-    .btn-secondary{background:#1e293b;color:#cbd5e1;border:1px solid #334155}
-    .btn-secondary:hover{background:#334155;color:#e2e8f0}
+
+    /* ── SIDEBAR NAV ─────────────────────────────────── */
+    .sidebar-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;cursor:pointer;font-size:.875rem;font-weight:500;color:var(--txt-2);transition:background .15s,color .15s}
+    .sidebar-item:hover{background:var(--brand-bg);color:var(--txt)}
+    .sidebar-item.active{background:var(--brand-bg);color:var(--brand-t);font-weight:600}
+
+    /* ── FORM INPUTS ─────────────────────────────────── */
+    .inp{width:100%;padding:9px 13px;border-radius:9px;border:1.5px solid var(--border-2);background:var(--bg-1);color:var(--txt);font-size:.875rem;outline:none;transition:border-color .15s,box-shadow .15s;font-family:inherit}
+    .inp:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+    .inp::placeholder{color:var(--txt-3)}
+    select.inp option{background:var(--bg-1);color:var(--txt)}
+
+    /* ── BUTTONS ─────────────────────────────────────── */
+    .btn{display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border-radius:9px;font-size:.875rem;font-weight:600;cursor:pointer;border:none;transition:all .15s;white-space:nowrap;font-family:inherit}
+    .btn-primary{background:var(--brand);color:#fff;box-shadow:0 1px 3px rgba(99,102,241,.3)}
+    .btn-primary:hover{background:var(--brand-h);box-shadow:0 2px 8px rgba(99,102,241,.4)}
+    .btn-secondary{background:var(--bg-2);color:var(--txt-2);border:1.5px solid var(--border-2)}
+    .btn-secondary:hover{background:var(--bg-3);color:var(--txt)}
     .btn-danger{background:#dc2626;color:#fff}
     .btn-danger:hover{background:#b91c1c}
-    .btn-ghost{background:transparent;color:#94a3b8;border:1px solid #334155}
-    .btn-ghost:hover{background:#1e293b;color:#e2e8f0}
+    .btn-ghost{background:transparent;color:var(--txt-2);border:1.5px solid var(--border-2)}
+    .btn-ghost:hover{background:var(--bg-2);color:var(--txt)}
     .btn-sm{padding:5px 12px !important;font-size:.8rem !important;border-radius:7px !important}
-    .btn:disabled{opacity:.45;cursor:not-allowed;pointer-events:none}
-    .tab{padding:7px 16px;border-radius:8px;font-size:.82rem;font-weight:600;cursor:pointer;color:#64748b;transition:all .15s;border:none;background:transparent}
-    .tab.active{background:#6366f1;color:#fff}
-    .tab:hover:not(.active){background:rgba(99,102,241,.1);color:#818cf8}
+    .btn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
+
+    /* ── TABS ────────────────────────────────────────── */
+    .tab{padding:6px 14px;border-radius:7px;font-size:.82rem;font-weight:600;cursor:pointer;color:var(--txt-3);transition:all .15s;border:none;background:transparent;font-family:inherit}
+    .tab.active{background:var(--brand);color:#fff}
+    .tab:hover:not(.active){background:var(--brand-bg);color:var(--brand-t)}
+
+    /* ── CARDS ───────────────────────────────────────── */
+    .card{background:var(--bg-1);border:1.5px solid var(--border-2);border-radius:14px;padding:18px;transition:border-color .15s,box-shadow .15s;box-shadow:var(--shadow)}
+    .card:hover{border-color:var(--brand);box-shadow:0 0 0 3px rgba(99,102,241,.08)}
+
+    /* ── TOASTS ──────────────────────────────────────── */
     #toast-container{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:10px;pointer-events:none}
-    .toast{padding:12px 18px;border-radius:12px;font-size:.85rem;font-weight:500;min-width:260px;max-width:380px;box-shadow:0 8px 30px rgba(0,0,0,.35);animation:fadeSlide .25s ease-out;pointer-events:all}
-    .card{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:18px;transition:border-color .15s,box-shadow .15s}
-    .card:hover{border-color:#4f46e5}
+    .toast{padding:12px 18px;border-radius:12px;font-size:.85rem;font-weight:500;min-width:260px;max-width:380px;box-shadow:0 8px 30px rgba(0,0,0,.2);animation:fadeSlide .25s ease-out;pointer-events:all}
+
+    /* ── MISC ────────────────────────────────────────── */
     .badge{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:6px;font-size:.72rem;font-weight:700;letter-spacing:.02em}
+    code{font-family:'Fira Code','Cascadia Code',monospace;font-size:.9em}
   </style>
 </head>
 
-<body class="bg-slate-950 text-slate-100 min-h-screen">
+<body class="min-h-screen">
 
 <!-- Splash shown while Babel compiles the script (removed by Shell on first render) -->
 <div id="amf-splash" style="position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#060b17 0%,#0f172a 60%,#1e1b4b 100%)">
@@ -251,8 +306,21 @@ var AzureWhisper = (() => {
 // AZURE CHAT
 // ═══════════════════════════════════════════════════════════════
 var AzureChat = (() => {
-  const SYS=`You are an expert enterprise meeting analyst. Analyze the transcript and return ONLY valid JSON matching the exact schema. Be precise and factual.`;
-  function prompt(text,template,participants,title){return `Meeting: ${title||'Untitled'}\nTemplate: ${template||'General'}\nParticipants: ${participants?.join(', ')||'Unknown'}\nTranscript:\n${text}\n\nReturn JSON:\n{"executiveSummary":"","discussionPoints":[],"decisions":[{"decision":"","madeBy":"","impact":"low|medium|high"}],"actionItems":[{"action":"","owner":"","dueDate":"","priority":"low|medium|high","status":"open"}],"risks":[{"risk":"","severity":"low|medium|high","mitigation":""}],"openQuestions":[],"importantQuotes":[{"quote":"","speaker":"","context":""}],"followUpEmail":{"subject":"","body":""},"meetingQuality":{"score":0,"positives":[],"improvements":[],"engagement":"low|medium|high"},"missedAccountability":[]}`;}
+  const SYS=`You are an expert enterprise meeting analyst. Analyze the transcript and return ONLY valid JSON matching the exact schema. Be precise and factual.
+
+SPEAKER ATTRIBUTION RULES:
+- The transcript may contain speaker labels like "Alice:" or "[Speaker 1]:" — preserve and use them.
+- If a known participants list is provided and the transcript has NO speaker labels, use context clues (first-person references, names mentioned, question/answer patterns, role-specific language) to infer who is likely speaking for each statement. Assign the most probable participant name.
+- When attribution is uncertain, use "Unknown" rather than guessing wildly.
+- Always populate the "speaker" field in importantQuotes and "madeBy" in decisions/actionItems with a participant name where possible.`;
+
+  function prompt(text,template,participants,title){
+    const pList=participants?.length?participants.join(', '):'Not specified';
+    const diarNote=participants?.length
+      ? `\nIMPORTANT: Use the participants list [${pList}] to attribute statements to specific people wherever the context allows. Look for: someone being addressed by name, first-person "I will..." statements that match a role, questions directed at a specific person, technical language suggesting a specific role.`
+      : '';
+    return `Meeting: ${title||'Untitled'}\nTemplate: ${template||'General'}\nParticipants: ${pList}${diarNote}\nTranscript:\n${text}\n\nReturn JSON:\n{"executiveSummary":"","discussionPoints":[],"decisions":[{"decision":"","madeBy":"","impact":"low|medium|high"}],"actionItems":[{"action":"","owner":"","dueDate":"","priority":"low|medium|high","status":"open"}],"risks":[{"risk":"","severity":"low|medium|high","mitigation":""}],"openQuestions":[],"importantQuotes":[{"quote":"","speaker":"","context":""}],"followUpEmail":{"subject":"","body":""},"meetingQuality":{"score":0,"positives":[],"improvements":[],"engagement":"low|medium|high"},"missedAccountability":[]}`;
+  }
   async function generateNotes(text,settings,meta={}){
     const{azureEndpoint,azureApiKey,chatDeployment,apiVersion}=settings;
     if(!azureEndpoint||!azureApiKey||!chatDeployment) throw new Error('Azure Chat not configured. Check Settings.');
@@ -491,9 +559,13 @@ const DEFAULT_SETTINGS={userName:'',organization:'',department:'',preferredLangu
   whisperDeployment:'gpt-4o-mini-transcribe',
   chatDeployment:'gpt-5-mini-1',
   apiVersion:'2025-01-01-preview',
-  defaultTemplate:'general',chunkIntervalSeconds:'20',autoGenerateInterval:'120',darkMode:'true',retentionDays:'90',maskConfidential:'false',consentAcknowledged:'false',setupComplete:'false'};
+  defaultTemplate:'general',chunkIntervalSeconds:'20',autoGenerateInterval:'120',darkMode:'system',retentionDays:'90',maskConfidential:'false',consentAcknowledged:'false',setupComplete:'false'};
 
 // ─── REDUCER ──────────────────────────────────────────────────────────────────
+// sessionStore: in-memory fallback when IndexedDB is unavailable
+// Keyed by meetingId → {meeting, transcript:[], notes:null}
+const sessionStore={};
+
 const init={view:VIEWS.ONBOARDING,settings:DEFAULT_SETTINGS,settingsLoaded:false,currentMeeting:null,recordingStatus:'idle',micActive:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],isTranscribing:false,aiNotes:EMPTY_NOTES,isGeneratingNotes:false,lastNotesAt:null,meetings:[],selectedMeeting:null,selectedTranscript:[],selectedNotes:null,sidebarCollapsed:false,activeNotesTab:'summary',participants:[],showNewMeetingModal:false};
 
 function reducer(s,a){
@@ -541,7 +613,17 @@ function Provider({children}){
     }).catch(()=>d({type:'LOAD_SETTINGS',p:DEFAULT_SETTINGS}));
   },[]);
 
-  useEffect(()=>{document.documentElement.classList.toggle('dark',s.settings.darkMode!=='false'&&s.settings.darkMode!==false);},[s.settings.darkMode]);
+  useEffect(()=>{
+    const dm=s.settings.darkMode;
+    if(dm==='system'||!dm){
+      const mq=window.matchMedia('(prefers-color-scheme: dark)');
+      document.documentElement.classList.toggle('dark',mq.matches);
+      const fn=e=>document.documentElement.classList.toggle('dark',e.matches);
+      mq.addEventListener('change',fn);
+      return()=>mq.removeEventListener('change',fn);
+    }
+    document.documentElement.classList.toggle('dark',dm==='true'||dm===true);
+  },[s.settings.darkMode]);
 
   useEffect(()=>{
     if(s.recordingStatus==='recording'){
@@ -565,7 +647,10 @@ function Provider({children}){
     startRecording:async(title,template,participants)=>{
       if(!s.micActive&&!s.screenAudioActive){Toast.error('Enable mic or meeting audio first.');return;}
       d({type:'SET_REC_STATUS',p:'starting'});
-      const id=Date.now(),meeting={id,title:title||`Meeting ${new Date().toLocaleDateString()}`,date:new Date().toISOString(),status:'recording',template:template||'general',participants:participants||s.participants,duration:0};
+      const _now=new Date(),_pad=n=>String(n).padStart(2,'0'),_defaultTitle=`Meeting — ${_now.getDate()} ${_now.toLocaleString('default',{month:'short'})} ${_now.getFullYear()} ${_pad(_now.getHours())}:${_pad(_now.getMinutes())}`;
+      const id=Date.now(),meeting={id,title:title||_defaultTitle,date:new Date().toISOString(),status:'recording',template:template||'general',participants:participants||s.participants,duration:0};
+      // Always keep a session copy (survives even when DB unavailable)
+      sessionStore[id]={meeting:{...meeting},transcript:[],notes:null};
       try{
         if(DB) await DB.meetings.add(meeting).catch(e=>console.warn('DB meetings.add:',e));
         d({type:'START_MEETING',p:meeting});
@@ -573,17 +658,19 @@ function Provider({children}){
         AudioCapture.startRecording(
           async(blob,meta)=>{
             if(DB) DB.audioChunks.add({meetingId:id,chunkIndex:meta.chunkId,blob,startTime:meta.startTime,endTime:meta.endTime}).catch(e=>console.warn('DB audioChunks:',e));
-            const entry={id:`c_${meta.chunkId}_${id}`,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:'🔄 Transcribing…',speaker:''};
+            const entry={id:`c_${meta.chunkId}_${id}`,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:'Transcribing…',speaker:''};
             d({type:'ADD_CHUNK',p:entry});
             d({type:'SET_TRANSCRIBING',p:true});
             try{
               const r=await AzureWhisper.transcribe(blob,s.settings,meta);
-              d({type:'UPD_CHUNK',p:{...entry,text:r.text||'(no speech detected)'}});
+              const updated={...entry,text:r.text||'(no speech detected)'};
+              d({type:'UPD_CHUNK',p:updated});
+              sessionStore[id]?.transcript.push(updated);
               if(DB) DB.transcripts.add({meetingId:id,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:r.text,speaker:'',language:r.language}).catch(e=>console.warn('DB transcripts:',e));
             }catch(e){d({type:'UPD_CHUNK',p:{...entry,text:`[Transcription error: ${e.message}]`}});Toast.error(`Transcription: ${e.message}`,6000);}
             finally{d({type:'SET_TRANSCRIBING',p:false});}
           },
-          async(finalBlob)=>{finalAudioRef.current=finalBlob;},
+          async(finalBlob)=>{finalAudioRef.current=finalBlob;if(sessionStore[id])sessionStore[id].audioBlob=finalBlob;},
           ci
         );
         Toast.success('Recording started.');
@@ -598,7 +685,11 @@ function Provider({children}){
       AudioCapture.stopRecording();
       const dur=s.recordingTimer;
       d({type:'END_MEETING',p:dur});
-      if(s.currentMeeting&&DB) await DB.meetings.update(s.currentMeeting.id,{status:'done',duration:dur}).catch(e=>console.warn('DB update:',e));
+      if(s.currentMeeting){
+        const done={...s.currentMeeting,status:'done',duration:dur};
+        if(sessionStore[s.currentMeeting.id])sessionStore[s.currentMeeting.id].meeting=done;
+        if(DB) await DB.meetings.update(s.currentMeeting.id,{status:'done',duration:dur}).catch(e=>console.warn('DB update:',e));
+      }
       Toast.success('Recording stopped. Generating final notes…');
       setTimeout(()=>ax.generateNotes(true),800);
     },
@@ -611,6 +702,7 @@ function Provider({children}){
         const text=s.transcriptChunks.filter(c=>!c.text.startsWith('[')).map(c=>`${c.speaker?c.speaker+': ':''}${c.text}`).join('\n');
         const notes=await AzureChat.generateNotes(text,s.settings,{title:s.currentMeeting?.title,template:s.currentMeeting?.template,participants:s.participants});
         d({type:'SET_NOTES',p:notes});
+        if(s.currentMeeting&&sessionStore[s.currentMeeting.id])sessionStore[s.currentMeeting.id].notes=notes;
         if(s.currentMeeting&&DB) await DB.aiNotes.put({meetingId:s.currentMeeting.id,notes,generatedAt:Date.now(),isFinal}).catch(e=>console.warn('DB aiNotes:',e));
         if(isFinal)Toast.success('Final notes generated!');
         else Toast.info('Notes updated.');
@@ -618,8 +710,22 @@ function Provider({children}){
       finally{d({type:'SET_GENERATING',p:false});}
     },
 
-    loadMeetings:async()=>{if(!DB){d({type:'SET_MEETINGS',p:[]});return;}const list=await DB.meetings.orderBy('date').reverse().limit(100).toArray().catch(()=>[]);d({type:'SET_MEETINGS',p:list});},
-    openMeeting:async(m)=>{const t=DB?await DB.transcripts.where('meetingId').equals(m.id).sortBy('startTime').catch(()=>[]):[];const nr=DB?await DB.aiNotes.where('meetingId').equals(m.id).last().catch(()=>null):null;d({type:'SET_SELECTED',p:{meeting:m,transcript:t,notes:nr?.notes||null}});d({type:'SET_VIEW',p:VIEWS.DETAIL});},
+    loadMeetings:async()=>{
+      // Merge DB meetings with session-only meetings (no DB or new this session)
+      const dbList=DB?await DB.meetings.orderBy('date').reverse().limit(100).toArray().catch(()=>[]):[];
+      const dbIds=new Set(dbList.map(m=>m.id));
+      const sessionList=Object.values(sessionStore).map(e=>e.meeting).filter(m=>!dbIds.has(m.id));
+      const merged=[...sessionList,...dbList].sort((a,b)=>new Date(b.date)-new Date(a.date));
+      d({type:'SET_MEETINGS',p:merged});
+    },
+    openMeeting:async(m)=>{
+      // Prefer session store (has live transcript objects); fall back to DB
+      const sess=sessionStore[m.id];
+      const t=sess?.transcript?.length?sess.transcript:(DB?await DB.transcripts.where('meetingId').equals(m.id).sortBy('startTime').catch(()=>[]):[]);
+      const notes=sess?.notes||(DB?(await DB.aiNotes.where('meetingId').equals(m.id).last().catch(()=>null))?.notes:null);
+      d({type:'SET_SELECTED',p:{meeting:m,transcript:t,notes}});
+      d({type:'SET_VIEW',p:VIEWS.DETAIL});
+    },
     deleteMeeting:async(id)=>{if(DB)await Promise.all([DB.meetings.delete(id),DB.transcripts.where('meetingId').equals(id).delete(),DB.audioChunks.where('meetingId').equals(id).delete(),DB.aiNotes.where('meetingId').equals(id).delete()]).catch(e=>console.warn('DB delete:',e));await ax.loadMeetings();Toast.success('Meeting deleted.');},
     newRecording:()=>{AudioCapture.stopAll();d({type:'RESET'});d({type:'SET_VIEW',p:VIEWS.RECORDING});},
     exportMeeting:async(m,t,n)=>{const aRow=DB?await DB.audioChunks.where('meetingId').equals(m.id).first().catch(()=>null):null;await ExportService.exportZip(m,t,n,aRow?.blob||null);},
@@ -630,6 +736,8 @@ function Provider({children}){
 
 // ─── ICON COMPONENT ───────────────────────────────────────────────────────────
 const Ic=({n,sz=18,cls=''})=>{const p={width:sz,height:sz,display:'inline-block',flexShrink:0};const ic={
+sun:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>,
+moon:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>,
 mic:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path strokeLinecap="round" strokeLinejoin="round" d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg>,
 micOff:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><line x1="1" y1="1" x2="23" y2="23"/><path strokeLinecap="round" d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6"/><path strokeLinecap="round" d="M17 16.95A7 7 0 015 12v-2m14 0v2a7 7 0 01-.11 1.23M12 19v4M8 23h8"/></svg>,
 monitor:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
@@ -964,16 +1072,15 @@ function Settings(){
         <Field label="LOCAL RETENTION (days)" help="Meetings older than this are flagged for deletion">
           <input className="inp" type="number" min="1" max="3650" value={form.retentionDays} onChange={set('retentionDays')}/>
         </Field>
-        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',background:'#1e293b',border:'1px solid #334155',borderRadius:'10px',padding:'14px',marginBottom:'12px'}}>
-          <div>
-            <div style={{fontWeight:'600',fontSize:'.875rem',color:'#e2e8f0'}}>Dark Mode</div>
-            <div style={{fontSize:'.75rem',color:'#64748b'}}>Use dark theme throughout the app</div>
+        <div style={{background:'var(--bg-2)',border:'1.5px solid var(--border-2)',borderRadius:'10px',padding:'14px',marginBottom:'12px'}}>
+          <div style={{fontWeight:'600',fontSize:'.875rem',color:'var(--txt)',marginBottom:'10px'}}>Theme</div>
+          <div style={{display:'flex',gap:'8px'}}>
+            {[['system','System'],['false','Light'],['true','Dark']].map(([val,label])=>(
+              <button key={val} onClick={()=>setForm(f=>({...f,darkMode:val}))} style={{flex:1,padding:'8px',borderRadius:'8px',border:`1.5px solid ${form.darkMode===val?'#6366f1':'var(--border-2)'}`,background:form.darkMode===val?'rgba(99,102,241,.1)':'transparent',color:form.darkMode===val?'#6366f1':'var(--txt-2)',fontWeight:'600',fontSize:'.82rem',cursor:'pointer',transition:'all .15s',fontFamily:'inherit'}}>
+                {val==='system'?<><Ic n="monitor" sz={13}/> {label}</>:val==='false'?<><Ic n="sun" sz={13}/> {label}</>:<><Ic n="moon" sz={13}/> {label}</>}
+              </button>
+            ))}
           </div>
-          <label style={{position:'relative',display:'inline-block',width:44,height:24,cursor:'pointer'}}>
-            <input type="checkbox" checked={form.darkMode!=='false'} onChange={e=>setForm(f=>({...f,darkMode:String(e.target.checked)}))} style={{opacity:0,width:0,height:0}}/>
-            <span style={{position:'absolute',inset:0,background:form.darkMode!=='false'?'#6366f1':'#334155',borderRadius:12,transition:'background .2s'}}/>
-            <span style={{position:'absolute',top:3,left:form.darkMode!=='false'?22:3,width:18,height:18,background:'#fff',borderRadius:'50%',transition:'left .2s'}}/>
-          </label>
         </div>
         <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'14px',fontSize:'.82rem',color:'#64748b',lineHeight:'1.6'}}>
           <Ic n="shield" sz={14}/> <strong style={{color:'#94a3b8'}}>Data stays local.</strong> Recordings, transcripts, and notes are stored in your browser's IndexedDB. Azure API calls are the only external network requests.
@@ -994,11 +1101,13 @@ function Sidebar(){
   const nav=(v)=>{d({type:'SET_VIEW',p:v});if(v===VIEWS.ARCHIVE)ax.loadMeetings();};
 
   return(
-    <div style={{width:col?64:220,background:'#0a0f1e',borderRight:'1px solid #1e293b',display:'flex',flexDirection:'column',transition:'width .2s',flexShrink:0,height:'100vh',overflow:'hidden'}}>
+    <div style={{width:col?64:220,background:'var(--sidebar)',borderRight:'1.5px solid var(--border-2)',display:'flex',flexDirection:'column',transition:'width .2s',flexShrink:0,height:'100vh',overflow:'hidden'}}>
       {/* Logo */}
-      <div style={{padding:col?'18px 0':'18px 16px',display:'flex',alignItems:'center',gap:'10px',borderBottom:'1px solid #1e293b',justifyContent:col?'center':'flex-start'}}>
-        <div style={{width:32,height:32,background:'linear-gradient(135deg,#6366f1,#8b5cf6)',borderRadius:'9px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'16px',flexShrink:0}}>🎙️</div>
-        {!col&&<div style={{fontSize:'.85rem',fontWeight:'700',color:'#e2e8f0',whiteSpace:'nowrap',overflow:'hidden'}}>AI Facilitator</div>}
+      <div style={{padding:col?'14px 0':'14px 14px',display:'flex',alignItems:'center',gap:'10px',borderBottom:'1.5px solid var(--border-2)',justifyContent:col?'center':'flex-start'}}>
+        <div style={{width:32,height:32,background:'linear-gradient(135deg,#6366f1,#8b5cf6)',borderRadius:'9px',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,boxShadow:'0 2px 8px rgba(99,102,241,.3)'}}>
+          <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="white" strokeWidth="2.2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path strokeLinecap="round" strokeLinejoin="round" d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg>
+        </div>
+        {!col&&<div style={{fontSize:'.85rem',fontWeight:'700',color:'var(--txt)',whiteSpace:'nowrap',overflow:'hidden',letterSpacing:'-.01em'}}>Meeting AI</div>}
       </div>
 
       {/* Nav */}
@@ -1026,13 +1135,13 @@ function Sidebar(){
       {/* Collapse toggle + user */}
       <div style={{padding:'12px 8px',borderTop:'1px solid #1e293b',display:'flex',flexDirection:'column',gap:'8px'}}>
         {!col&&s.settings.userName&&(
-          <div style={{display:'flex',alignItems:'center',gap:'8px',padding:'8px 10px',borderRadius:'10px',background:'#1e293b'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'8px',padding:'8px 10px',borderRadius:'10px',background:'var(--bg-2)',border:'1.5px solid var(--border-2)'}}>
             <div style={{width:28,height:28,borderRadius:'50%',background:'linear-gradient(135deg,#6366f1,#8b5cf6)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'12px',fontWeight:'700',color:'#fff',flexShrink:0}}>
               {s.settings.userName.charAt(0).toUpperCase()}
             </div>
             <div style={{overflow:'hidden'}}>
-              <div style={{fontSize:'.8rem',fontWeight:'600',color:'#e2e8f0',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.settings.userName}</div>
-              {s.settings.organization&&<div style={{fontSize:'.7rem',color:'#475569',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.settings.organization}</div>}
+              <div style={{fontSize:'.8rem',fontWeight:'600',color:'var(--txt)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.settings.userName}</div>
+              {s.settings.organization&&<div style={{fontSize:'.7rem',color:'var(--txt-3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.settings.organization}</div>}
             </div>
           </div>
         )}
@@ -1046,13 +1155,18 @@ function Sidebar(){
 
 // ─── TOP BAR ─────────────────────────────────────────────────────────────────
 function TopBar(){
-  const{s,ax}=useApp();
+  const{s,ax,d}=useApp();
   const isRec=s.recordingStatus==='recording';
   const isPaused=s.recordingStatus==='paused';
+  const isDark=document.documentElement.classList.contains('dark');
   const viewLabels={[VIEWS.RECORDING]:'Recording Studio',[VIEWS.ARCHIVE]:'Meeting Archive',[VIEWS.SETTINGS]:'Settings',[VIEWS.TEMPLATES]:'Templates',[VIEWS.DETAIL]:'Meeting Detail'};
+  const toggleTheme=()=>{
+    const next=isDark?'false':'true';
+    ax.saveSettings({...s.settings,darkMode:next});
+  };
 
   return(
-    <div style={{height:56,background:'#0a0f1e',borderBottom:'1px solid #1e293b',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0 20px',flexShrink:0,zIndex:10}}>
+    <div style={{height:56,background:'var(--topbar)',borderBottom:'1.5px solid var(--border-2)',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0 20px',flexShrink:0,zIndex:10,boxShadow:'var(--shadow)'}}>
       <div style={{display:'flex',alignItems:'center',gap:'14px'}}>
         <span style={{fontSize:'.95rem',fontWeight:'600',color:'#e2e8f0'}}>{viewLabels[s.view]||'AI Meeting Facilitator'}</span>
         {s.currentMeeting&&(
@@ -1070,10 +1184,16 @@ function TopBar(){
           </div>
         )}
 
+        {/* Theme toggle */}
+        <button onClick={toggleTheme} title={isDark?'Switch to light mode':'Switch to dark mode'} style={{display:'flex',alignItems:'center',justifyContent:'center',width:32,height:32,borderRadius:'8px',background:'var(--bg-2)',border:'1.5px solid var(--border-2)',cursor:'pointer',color:'var(--txt-2)',transition:'all .15s'}}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor='var(--brand)';e.currentTarget.style.color='var(--brand)'}}
+          onMouseLeave={e=>{e.currentTarget.style.borderColor='var(--border-2)';e.currentTarget.style.color='var(--txt-2)'}}>
+          <Ic n={isDark?'sun':'moon'} sz={15}/>
+        </button>
         {/* Privacy badge */}
-        <div style={{display:'flex',alignItems:'center',gap:'5px',background:'#1e293b',border:'1px solid #334155',borderRadius:'7px',padding:'4px 10px'}}>
-          <Ic n="shield" sz={13} cls="" style={{color:'#6366f1'}}/>
-          <span style={{fontSize:'.72rem',fontWeight:'600',color:'#64748b'}}>LOCAL ONLY</span>
+        <div style={{display:'flex',alignItems:'center',gap:'5px',background:'var(--bg-2)',border:'1.5px solid var(--border-2)',borderRadius:'7px',padding:'4px 10px'}}>
+          <Ic n="shield" sz={13} cls="" style={{color:'var(--brand)'}}/>
+          <span style={{fontSize:'.72rem',fontWeight:'600',color:'var(--txt-3)'}}>LOCAL ONLY</span>
         </div>
 
         {/* Status */}
@@ -1116,7 +1236,7 @@ function NewMeetingModal({onStart,onClose}){
         <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
           <div>
             <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>MEETING TITLE</label>
-            <input className="inp" placeholder={`Meeting ${new Date().toLocaleDateString()}`} value={title} onChange={e=>setTitle(e.target.value)} autoFocus/>
+            <input className="inp" placeholder={`Meeting — ${new Date().getDate()} ${new Date().toLocaleString('default',{month:'short'})} ${new Date().getFullYear()} ${String(new Date().getHours()).padStart(2,'0')}:${String(new Date().getMinutes()).padStart(2,'0')}`} value={title} onChange={e=>setTitle(e.target.value)} autoFocus/>
           </div>
           <div>
             <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'8px'}}>TEMPLATE</label>
@@ -1617,11 +1737,33 @@ function RecordingStudio(){
       <div style={{flex:1,overflow:'auto',padding:'20px',display:'flex',flexDirection:'column',gap:'16px'}}>
 
         {/* Capture row */}
-        <div style={{display:'flex',gap:'12px',flexWrap:'wrap'}}>
-          <CaptureCard icon="mic" label="Microphone" active={s.micActive} onStart={handleStartMic} onStop={ax.stopMic} description="Click to start mic" loading={micLoading}/>
-          <CaptureCard icon="monitor" label="Meeting Audio" active={s.screenAudioActive} onStart={handleStartScreen} onStop={ax.stopScreen} description="Teams/Meet/Zoom — share tab or screen" hasAudio={s.screenAudioActive} loading={screenLoading}/>
-          <CaptureCard icon="video" label="Camera" active={s.cameraActive} onStart={handleStartCam} onStop={ax.stopCamera} description="Click to start camera" loading={camLoading}/>
-          {s.cameraActive&&<CameraPreview/>}
+        <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
+          <div style={{display:'flex',gap:'12px',flexWrap:'wrap'}}>
+            <CaptureCard icon="mic" label="Microphone" active={s.micActive} onStart={handleStartMic} onStop={ax.stopMic} description="Your mic — for in-person or hybrid" loading={micLoading}/>
+            <CaptureCard icon="monitor" label="Meeting Audio" active={s.screenAudioActive} onStart={handleStartScreen} onStop={ax.stopScreen} description="Teams / Meet / Zoom — share tab or screen" hasAudio={s.screenAudioActive} loading={screenLoading}/>
+            <CaptureCard icon="video" label="Camera" active={s.cameraActive} onStart={handleStartCam} onStop={ax.stopCamera} description="Optional video preview" loading={camLoading}/>
+            {s.cameraActive&&<CameraPreview/>}
+          </div>
+          {/* Combined sources status */}
+          {(s.micActive||s.screenAudioActive)&&(
+            <div style={{display:'flex',alignItems:'center',gap:'10px',padding:'9px 14px',background:'rgba(16,185,129,.06)',border:'1px solid rgba(16,185,129,.2)',borderRadius:'10px',fontSize:'.8rem',flexWrap:'wrap'}}>
+              <span style={{color:'#34d399',fontWeight:'700'}}>🎙 Active sources:</span>
+              {s.micActive&&<span style={{background:'rgba(16,185,129,.12)',border:'1px solid rgba(16,185,129,.3)',color:'#6ee7b7',padding:'2px 10px',borderRadius:'999px'}}>Microphone</span>}
+              {s.micActive&&s.screenAudioActive&&<span style={{color:'#475569'}}>+</span>}
+              {s.screenAudioActive&&<span style={{background:'rgba(16,185,129,.12)',border:'1px solid rgba(16,185,129,.3)',color:'#6ee7b7',padding:'2px 10px',borderRadius:'999px'}}>Meeting Audio</span>}
+              <span style={{color:'#475569',marginLeft:'4px'}}>— both will be mixed and transcribed together</span>
+              {!s.micActive&&s.screenAudioActive&&(
+                <button className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}} onClick={handleStartMic} disabled={micLoading}>
+                  {micLoading?<Spin sz={12}/>:<Ic n="mic" sz={12}/>} Add mic too
+                </button>
+              )}
+              {s.micActive&&!s.screenAudioActive&&(
+                <button className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}} onClick={handleStartScreen} disabled={screenLoading}>
+                  {screenLoading?<Spin sz={12}/>:<Ic n="monitor" sz={12}/>} Add meeting audio
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Controls + participants row */}
@@ -1975,7 +2117,7 @@ function Shell(){
       <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
         <FileProtocolBanner/>
         <TopBar/>
-        <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column',background:'#060b17'}}>
+        <div style={{flex:1,overflow:'hidden',display:'flex',flexDirection:'column',background:'var(--bg)'}}>
           {s.view===VIEWS.RECORDING&&<RecordingStudio/>}
           {s.view===VIEWS.ARCHIVE&&<Archive/>}
           {s.view===VIEWS.SETTINGS&&<div style={{flex:1,overflow:'auto'}}><Settings/></div>}
