@@ -257,7 +257,7 @@ var AzureChat = (() => {
     const{azureEndpoint,azureApiKey,chatDeployment,apiVersion}=settings;
     if(!azureEndpoint||!azureApiKey||!chatDeployment) throw new Error('Azure Chat not configured. Check Settings.');
     const url=`${azureEndpoint.replace(/\/$/,'')}/openai/deployments/${chatDeployment}/chat/completions?api-version=${apiVersion||'2024-02-01'}`;
-    const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','api-key':azureApiKey},body:JSON.stringify({messages:[{role:'system',content:SYS},{role:'user',content:prompt(text,meta.template,meta.participants,meta.title)}],temperature:.3,max_completion_tokens:3000,response_format:{type:'json_object'}})});
+    const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','api-key':azureApiKey},body:JSON.stringify({messages:[{role:'system',content:SYS},{role:'user',content:prompt(text,meta.template,meta.participants,meta.title)}],max_completion_tokens:3000,response_format:{type:'json_object'}})});
     if(!res.ok){const e=await res.text(); if(res.status===401)throw new Error('API key invalid.'); if(res.status===404)throw new Error(`Chat deployment "${chatDeployment}" not found.`); throw new Error(`Chat error ${res.status}: ${e.slice(0,180)}`);}
     const data=await res.json(), content=data.choices?.[0]?.message?.content;
     if(!content) throw new Error('Empty response from Azure Chat.');
@@ -330,9 +330,10 @@ var AudioCapture = (() => {
       });
       const t = screenStream.getAudioTracks();
       if (!t.length) {
-        Toast.warning('⚠️ No audio captured. In the share dialog, tick "Share tab audio" or "Share system audio".');
+        Toast.warning('No audio captured. Re-click Meeting Audio and in the share dialog: ① For Teams browser tab → pick the tab + tick "Share tab audio". ② For Teams desktop app → pick "Entire Screen" + tick "Also share system audio".', 9000);
         return {ok:true, hasAudio:false};
       }
+      Toast.success(`Meeting audio active — ${t[0].label||'system audio'}. Transcription will begin when recording starts.`);
       return {ok:true, hasAudio:true, trackLabel: t[0].label};
     } catch(e) {
       if(e.name==='NotAllowedError'||e.name==='AbortError') throw new Error('Screen sharing was cancelled or denied. Click "Meeting Audio" and select a tab/window.');
@@ -1618,7 +1619,7 @@ function RecordingStudio(){
         {/* Capture row */}
         <div style={{display:'flex',gap:'12px',flexWrap:'wrap'}}>
           <CaptureCard icon="mic" label="Microphone" active={s.micActive} onStart={handleStartMic} onStop={ax.stopMic} description="Click to start mic" loading={micLoading}/>
-          <CaptureCard icon="monitor" label="Meeting Audio" active={s.screenAudioActive} onStart={handleStartScreen} onStop={ax.stopScreen} description="Click to share tab/screen" hasAudio={s.screenAudioActive} loading={screenLoading}/>
+          <CaptureCard icon="monitor" label="Meeting Audio" active={s.screenAudioActive} onStart={handleStartScreen} onStop={ax.stopScreen} description="Teams/Meet/Zoom — share tab or screen" hasAudio={s.screenAudioActive} loading={screenLoading}/>
           <CaptureCard icon="video" label="Camera" active={s.cameraActive} onStart={handleStartCam} onStop={ax.stopCamera} description="Click to start camera" loading={camLoading}/>
           {s.cameraActive&&<CameraPreview/>}
         </div>
@@ -1640,6 +1641,18 @@ function RecordingStudio(){
           </div>
           <div style={{flex:1,minWidth:220}}><ParticipantPanel/></div>
         </div>
+
+        {/* Teams / platform capture guide */}
+        {s.recordingStatus==='idle'&&!s.micActive&&!s.screenAudioActive&&(
+          <div style={{background:'rgba(99,102,241,.06)',border:'1px solid rgba(99,102,241,.2)',borderRadius:'10px',padding:'12px 16px',fontSize:'.82rem',color:'#94a3b8',lineHeight:'1.7'}}>
+            <span style={{color:'#a5b4fc',fontWeight:'700'}}>📋 How to capture your meeting audio:</span>
+            <div style={{marginTop:'6px',display:'flex',flexDirection:'column',gap:'4px'}}>
+              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Teams / Meet / Zoom in browser:</span> Click <strong style={{color:'#e2e8f0'}}>Meeting Audio</strong> → select the meeting tab → tick <em>"Share tab audio"</em></div>
+              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Teams desktop app (Windows):</span> Click <strong style={{color:'#e2e8f0'}}>Meeting Audio</strong> → select <em>"Entire Screen"</em> → tick <em>"Also share system audio"</em></div>
+              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Physical room / in-person:</span> Click <strong style={{color:'#e2e8f0'}}>Microphone</strong> to capture your mic directly</div>
+            </div>
+          </div>
+        )}
 
         {/* Speaker mode notice */}
         {(s.recordingStatus==='recording'||s.recordingStatus==='paused')&&(
