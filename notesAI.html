@@ -76,6 +76,9 @@
     @keyframes fadeSlide{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes blink{0%,100%{background:#ef4444}50%{background:#fca5a5}}
+    @keyframes attentionPulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.7),0 4px 20px rgba(239,68,68,.3)}50%{box-shadow:0 0 0 8px rgba(239,68,68,.0),0 4px 20px rgba(239,68,68,.5)}}
+    @keyframes attentionSlide{from{opacity:0;transform:translateY(-12px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+    .attention-pulse{animation:attentionPulse 1.4s ease-in-out infinite;}
     .rec-dot{width:9px;height:9px;border-radius:50%;background:#ef4444;animation:blink 1.2s ease-in-out infinite}
     .fade-slide{animation:fadeSlide .25s ease-out}
     .spinner{animation:spin 1s linear infinite}
@@ -269,7 +272,7 @@ var CryptoUtil = (() => {
 var Toast = (() => {
   function show(msg, type='info', ms=4500) {
     const c=document.getElementById('toast-container'), el=document.createElement('div');
-    const bg={info:'background:#1e293b;border:1px solid #475569;color:#e2e8f0',success:'background:#052e16;border:1px solid #166534;color:#86efac',error:'background:#450a0a;border:1px solid #991b1b;color:#fca5a5',warning:'background:#431407;border:1px solid #9a3412;color:#fdba74'};
+    const bg={info:'background:var(--bg-2);border:1px solid var(--border-2);color:var(--txt)',success:'background:#052e16;border:1px solid #166534;color:#86efac',error:'background:#450a0a;border:1px solid #991b1b;color:#fca5a5',warning:'background:#431407;border:1px solid #9a3412;color:#fdba74'};
     const ic={info:'ℹ️',success:'✅',error:'❌',warning:'⚠️'};
     el.className='toast'; el.style.cssText=bg[type]||bg.info;
     el.innerHTML=`<span style="margin-right:7px">${ic[type]}</span>${msg}`;
@@ -339,7 +342,25 @@ SPEAKER ATTRIBUTION RULES:
     if(!res.ok){const e=await res.text();throw new Error(`Chat test ${res.status}: ${e.slice(0,150)}`);}
     return res.json();
   }
-  return {generateNotes,testConnection};
+  // Lightweight single-turn call — used for attention card context
+  async function quick(settings,userPrompt){
+    const{azureEndpoint,azureApiKey,chatDeployment,apiVersion}=settings;
+    if(!azureEndpoint||!azureApiKey||!chatDeployment) return null;
+    const url=`${azureEndpoint.replace(/\/$/,'')}/openai/deployments/${chatDeployment}/chat/completions?api-version=${apiVersion||'2024-02-01'}`;
+    try{
+      const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','api-key':azureApiKey},
+        body:JSON.stringify({messages:[
+          {role:'system',content:'You are a helpful meeting assistant. Always respond with valid JSON.'},
+          {role:'user',content:userPrompt+'\n\nReturn valid JSON only.'}
+        ],max_completion_tokens:200,response_format:{type:'json_object'}})});
+      if(!res.ok) return null;
+      const data=await res.json();
+      const content=data.choices?.[0]?.message?.content;
+      if(!content) return null;
+      return JSON.parse(content);
+    }catch{return null;}
+  }
+  return {generateNotes,testConnection,quick};
 })();
 
 // ═══════════════════════════════════════════════════════════════
@@ -523,14 +544,171 @@ var ExportService = (() => {
   return{toMd,dl,exportZip,fmt,fmtT};
 })();
 
+// ═══════════════════════════════════════════════════════════════
+// FILE SYSTEM SERVICE  (File System Access API — Chrome/Edge 86+)
+// Persists meeting data to a user-chosen folder on their computer.
+// ═══════════════════════════════════════════════════════════════
+var FileSystemService = (() => {
+  // We store the directory handle in IndexedDB (key "fsa_workspace_handle")
+  // so the user only has to pick the folder once per origin.
+  const HANDLE_KEY = 'fsa_workspace_handle';
+  let _handle = null; // cached in memory once retrieved
+
+  // ── Check browser support ─────────────────────────────────────
+  function isSupported() {
+    return typeof window.showDirectoryPicker === 'function';
+  }
+
+  // ── Persist handle to a tiny separate IDB store ───────────────
+  async function _storeHandle(h) {
+    return new Promise((res, rej) => {
+      const req = indexedDB.open('amf_fsa', 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore('handles');
+      req.onsuccess = e => {
+        const tx = e.target.result.transaction('handles', 'readwrite');
+        tx.objectStore('handles').put(h, HANDLE_KEY);
+        tx.oncomplete = () => res();
+        tx.onerror = rej;
+      };
+      req.onerror = rej;
+    });
+  }
+  async function _loadHandle() {
+    return new Promise((res) => {
+      const req = indexedDB.open('amf_fsa', 1);
+      req.onupgradeneeded = e => e.target.result.createObjectStore('handles');
+      req.onsuccess = e => {
+        const tx = e.target.result.transaction('handles', 'readonly');
+        const r2 = tx.objectStore('handles').get(HANDLE_KEY);
+        r2.onsuccess = () => res(r2.result || null);
+        r2.onerror = () => res(null);
+      };
+      req.onerror = () => res(null);
+    });
+  }
+  async function _clearHandle() {
+    _handle = null;
+    return new Promise((res) => {
+      const req = indexedDB.open('amf_fsa', 1);
+      req.onsuccess = e => {
+        const tx = e.target.result.transaction('handles', 'readwrite');
+        tx.objectStore('handles').delete(HANDLE_KEY);
+        tx.oncomplete = res;
+        tx.onerror = res;
+      };
+      req.onerror = res;
+    });
+  }
+
+  // ── Let the user pick a folder ────────────────────────────────
+  async function pickFolder() {
+    if (!isSupported()) throw new Error('File System Access API not supported in this browser.');
+    const h = await window.showDirectoryPicker({ mode: 'readwrite', startIn: 'documents' });
+    _handle = h;
+    await _storeHandle(h);
+    return h;
+  }
+
+  // ── Retrieve the stored handle (re-request permission if needed) ─
+  async function getFolder() {
+    if (_handle) {
+      const perm = await _handle.queryPermission({ mode: 'readwrite' });
+      if (perm === 'granted') return _handle;
+    }
+    const stored = await _loadHandle();
+    if (!stored) return null;
+    // Re-verify permission (needed after page reload)
+    try {
+      const perm = await stored.queryPermission({ mode: 'readwrite' });
+      if (perm === 'granted') { _handle = stored; return _handle; }
+      const req = await stored.requestPermission({ mode: 'readwrite' });
+      if (req === 'granted') { _handle = stored; return _handle; }
+    } catch { /* permission denied or revoked */ }
+    return null;
+  }
+
+  // ── Get folder name for display ───────────────────────────────
+  async function getFolderName() {
+    const h = await getFolder();
+    return h ? h.name : null;
+  }
+
+  // ── Sanitise a string for use as a folder/file name ──────────
+  function _safe(s) {
+    return (s || 'Meeting').replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 80);
+  }
+
+  // ── Write text or blob to a file inside a directory handle ───
+  async function _writeFile(dirHandle, filename, content) {
+    const fh = await dirHandle.getFileHandle(filename, { create: true });
+    const writable = await fh.createWritable();
+    await writable.write(content);
+    await writable.close();
+  }
+
+  // ── Save one meeting to disk ──────────────────────────────────
+  // Creates: WorkspaceFolder/<safe-title>/
+  //   notes.md, transcript.txt, data.json, [audio.webm]
+  async function saveMeeting(meeting, transcript, notes, audioBlob) {
+    const root = await getFolder();
+    if (!root) throw new Error('No workspace folder configured. Pick one in Settings.');
+    const dateStr = new Date(meeting.date).toISOString().slice(0, 10);
+    const folderName = `${_safe(meeting.title)}_${dateStr}`;
+    const dir = await root.getDirectoryHandle(folderName, { create: true });
+
+    // notes.md
+    const md = ExportService.toMd(meeting, transcript, notes);
+    await _writeFile(dir, 'notes.md', md);
+
+    // transcript.txt
+    const txt = transcript.map(c => `[${ExportService.fmtT(c.startTime)}] ${c.speaker ? c.speaker + ': ' : ''}${c.text}`).join('\n\n');
+    await _writeFile(dir, 'transcript.txt', txt);
+
+    // data.json  (full structured data — can be re-imported later)
+    await _writeFile(dir, 'data.json', JSON.stringify({ meeting, transcript, notes }, null, 2));
+
+    // audio.webm (optional — may be large)
+    if (audioBlob) {
+      await _writeFile(dir, 'audio.webm', audioBlob);
+    }
+
+    return folderName;
+  }
+
+  // ── Load meetings from the workspace folder ───────────────────
+  // Scans all subfolders, reads data.json from each.
+  async function loadMeetings() {
+    const root = await getFolder();
+    if (!root) return [];
+    const meetings = [];
+    for await (const [name, entry] of root.entries()) {
+      if (entry.kind !== 'directory') continue;
+      try {
+        const fh = await entry.getFileHandle('data.json').catch(() => null);
+        if (!fh) continue;
+        const file = await fh.getFile();
+        const text = await file.text();
+        const data = JSON.parse(text);
+        if (data.meeting) meetings.push({ ...data, _fromDisk: true, _folderName: name });
+      } catch { /* skip corrupted folders */ }
+    }
+    // Sort newest first
+    meetings.sort((a, b) => new Date(b.meeting.date) - new Date(a.meeting.date));
+    return meetings;
+  }
+
+  return { isSupported, pickFolder, getFolder, getFolderName, saveMeeting, loadMeetings, clearFolder: _clearHandle };
+})();
+
 // Pin all services to window so the Babel-compiled script can always find them
-window.DB          = DB;
-window.CryptoUtil  = CryptoUtil;
-window.Toast       = Toast;
-window.AzureWhisper= AzureWhisper;
-window.AzureChat   = AzureChat;
-window.AudioCapture= AudioCapture;
-window.ExportService=ExportService;
+window.DB               = DB;
+window.CryptoUtil       = CryptoUtil;
+window.Toast            = Toast;
+window.AzureWhisper     = AzureWhisper;
+window.AzureChat        = AzureChat;
+window.AudioCapture     = AudioCapture;
+window.ExportService    = ExportService;
+window.FileSystemService= FileSystemService;
 
 // ═══════════════════════════════════════════════════════════════
 // TEMPLATES
@@ -566,7 +744,7 @@ const DEFAULT_SETTINGS={userName:'',organization:'',department:'',preferredLangu
 // Keyed by meetingId → {meeting, transcript:[], notes:null}
 const sessionStore={};
 
-const init={view:VIEWS.ONBOARDING,settings:DEFAULT_SETTINGS,settingsLoaded:false,currentMeeting:null,recordingStatus:'idle',micActive:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],isTranscribing:false,aiNotes:EMPTY_NOTES,isGeneratingNotes:false,lastNotesAt:null,meetings:[],selectedMeeting:null,selectedTranscript:[],selectedNotes:null,sidebarCollapsed:false,activeNotesTab:'summary',participants:[],showNewMeetingModal:false};
+const init={view:VIEWS.ONBOARDING,settings:DEFAULT_SETTINGS,settingsLoaded:false,currentMeeting:null,recordingStatus:'idle',micActive:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],isTranscribing:false,aiNotes:EMPTY_NOTES,isGeneratingNotes:false,lastNotesAt:null,meetings:[],selectedMeeting:null,selectedTranscript:[],selectedNotes:null,sidebarCollapsed:false,activeNotesTab:'summary',participants:[],showNewMeetingModal:false,attentionAlerts:[],attentionDismissed:false};
 
 function reducer(s,a){
   switch(a.type){
@@ -593,7 +771,11 @@ function reducer(s,a){
     case 'ADD_PARTICIPANT':return{...s,participants:[...new Set([...s.participants,a.p])]};
     case 'UPD_SPEAKER':return{...s,transcriptChunks:s.transcriptChunks.map(c=>c.id===a.p.id?{...c,speaker:a.p.speaker}:c)};
     case 'SHOW_NEW_MODAL':return{...s,showNewMeetingModal:a.p};
-    case 'RESET':return{...s,currentMeeting:null,recordingStatus:'idle',micActive:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],aiNotes:EMPTY_NOTES,isTranscribing:false,isGeneratingNotes:false,participants:[],lastNotesAt:null,showNewMeetingModal:false};
+    case 'ADD_ATTENTION':return{...s,attentionAlerts:[a.p,...s.attentionAlerts].slice(0,10),attentionDismissed:false};
+    case 'UPD_ATTENTION':return{...s,attentionAlerts:s.attentionAlerts.map(a2=>a2.id===a.p.id?{...a2,...a.p}:a2)};
+    case 'DISMISS_ATTENTION':return{...s,attentionDismissed:true};
+    case 'CLEAR_ATTENTION':return{...s,attentionAlerts:[],attentionDismissed:false};
+    case 'RESET':return{...s,currentMeeting:null,recordingStatus:'idle',micActive:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],aiNotes:EMPTY_NOTES,isTranscribing:false,isGeneratingNotes:false,participants:[],lastNotesAt:null,showNewMeetingModal:false,attentionAlerts:[],attentionDismissed:false};
     default:return s;
   }
 }
@@ -658,7 +840,9 @@ function Provider({children}){
         AudioCapture.startRecording(
           async(blob,meta)=>{
             if(DB) DB.audioChunks.add({meetingId:id,chunkIndex:meta.chunkId,blob,startTime:meta.startTime,endTime:meta.endTime}).catch(e=>console.warn('DB audioChunks:',e));
-            const entry={id:`c_${meta.chunkId}_${id}`,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:'Transcribing…',speaker:''};
+            // Auto-assign speaker from profile when mic is the source (mic-only or mic+screen)
+            const autoSpeaker=s.micActive&&s.settings.userName?s.settings.userName:'';
+            const entry={id:`c_${meta.chunkId}_${id}`,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:'Transcribing…',speaker:autoSpeaker};
             d({type:'ADD_CHUNK',p:entry});
             d({type:'SET_TRANSCRIBING',p:true});
             try{
@@ -666,7 +850,30 @@ function Provider({children}){
               const updated={...entry,text:r.text||'(no speech detected)'};
               d({type:'UPD_CHUNK',p:updated});
               sessionStore[id]?.transcript.push(updated);
-              if(DB) DB.transcripts.add({meetingId:id,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:r.text,speaker:'',language:r.language}).catch(e=>console.warn('DB transcripts:',e));
+              if(DB) DB.transcripts.add({meetingId:id,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:r.text,speaker:autoSpeaker,language:r.language}).catch(e=>console.warn('DB transcripts:',e));
+              // ── ATTENTION DETECTION ──────────────────────────────────────
+              if(r.text){
+                const uName=(s.settings.userName||'').trim();
+                if(uName){
+                  // Build alias list from name (e.g. "Devender Ahras" → ["devender","ahras","dev","da"])
+                  const parts=uName.toLowerCase().split(/\s+/);
+                  const aliases=[...parts];
+                  if(parts[0]&&parts[0].length>3) aliases.push(parts[0].slice(0,3)); // "Dev" from "Devender"
+                  const txt=r.text.toLowerCase();
+                  const hit=aliases.find(a=>a.length>1&&new RegExp('\\b'+a+'\\b').test(txt));
+                  if(hit){
+                    // Get surrounding context (last 3 chunks of transcript for AI)
+                    const ctx=sessionStore[id]?.transcript.slice(-4).map(c=>`${c.speaker||'?'}: ${c.text}`).join('\n')||r.text;
+                    const alertId=`att_${meta.chunkId}_${id}`;
+                    const alertTs=Date.now();
+                    d({type:'ADD_ATTENTION',p:{id:alertId,chunkId:meta.chunkId,text:r.text,matchedAlias:hit,context:ctx,aiSummary:null,timestamp:alertTs}});
+                    // Async — fetch AI context (non-blocking), then update same alert
+                    AzureChat.quick(s.settings,`You are a meeting assistant. The user's name is "${uName}". Their name was just mentioned in the meeting transcript. Analyze the context and respond with a JSON object with keys: "whatWasSaid" (1 sentence summary of what was said about them), "expectedAction" (what they are expected to do or respond — null if unclear). Context:\n${ctx}`)
+                      .then(ai=>{if(ai)d({type:'UPD_ATTENTION',p:{id:alertId,aiSummary:ai}});})
+                      .catch(()=>{});
+                  }
+                }
+              }
             }catch(e){d({type:'UPD_CHUNK',p:{...entry,text:`[Transcription error: ${e.message}]`}});Toast.error(`Transcription: ${e.message}`,6000);}
             finally{d({type:'SET_TRANSCRIBING',p:false});}
           },
@@ -704,25 +911,72 @@ function Provider({children}){
         d({type:'SET_NOTES',p:notes});
         if(s.currentMeeting&&sessionStore[s.currentMeeting.id])sessionStore[s.currentMeeting.id].notes=notes;
         if(s.currentMeeting&&DB) await DB.aiNotes.put({meetingId:s.currentMeeting.id,notes,generatedAt:Date.now(),isFinal}).catch(e=>console.warn('DB aiNotes:',e));
-        if(isFinal)Toast.success('Final notes generated!');
-        else Toast.info('Notes updated.');
+        if(isFinal){
+          Toast.success('Final notes generated!');
+          // ── AUTO-SAVE TO WORKSPACE FOLDER ────────────────────────
+          setTimeout(()=>ax.saveMeetingToDisk(s.currentMeeting,s.transcriptChunks,notes),400);
+        } else {
+          Toast.info('Notes updated.');
+        }
       }catch(e){Toast.error(`Notes: ${e.message}`,7000);}
       finally{d({type:'SET_GENERATING',p:false});}
     },
 
+    saveMeetingToDisk:async(meeting,transcript,notes)=>{
+      if(!meeting) return;
+      try{
+        // Retrieve audio blob from session store or finalAudioRef
+        const audioBlob=finalAudioRef.current||(sessionStore[meeting.id]?.audioBlob)||null;
+        const folderName=await FileSystemService.saveMeeting(meeting,transcript,notes,audioBlob);
+        Toast.success(`✅ Saved to folder: ${folderName}`,7000);
+        // Optionally prune from IndexedDB to keep browser storage lean
+        if(DB&&s.settings.retentionDays!=='never'){
+          await Promise.all([
+            DB.transcripts.where('meetingId').equals(meeting.id).delete(),
+            DB.audioChunks.where('meetingId').equals(meeting.id).delete(),
+          ]).catch(()=>{});
+        }
+      }catch(e){
+        // Not configured yet — show a soft nudge, not a hard error
+        if(e.message.includes('No workspace folder')){
+          Toast.info('💾 Tip: Pick a workspace folder in Settings to auto-save meetings to your computer.',8000);
+        }else if(e.message.includes('aborted')||e.message.includes('dismissed')){
+          // user cancelled picker — ignore
+        }else{
+          Toast.error(`Disk save: ${e.message}`,6000);
+        }
+      }
+    },
+
     loadMeetings:async()=>{
-      // Merge DB meetings with session-only meetings (no DB or new this session)
-      const dbList=DB?await DB.meetings.orderBy('date').reverse().limit(100).toArray().catch(()=>[]):[];
+      // 1. DB meetings
+      const dbList=DB?await DB.meetings.orderBy('date').reverse().limit(200).toArray().catch(()=>[]):[];
       const dbIds=new Set(dbList.map(m=>m.id));
+      // 2. Session-only (not yet in DB)
       const sessionList=Object.values(sessionStore).map(e=>e.meeting).filter(m=>!dbIds.has(m.id));
-      const merged=[...sessionList,...dbList].sort((a,b)=>new Date(b.date)-new Date(a.date));
+      // 3. Workspace folder (disk) — scan asynchronously, deduplicate by id
+      let diskList=[];
+      try{
+        const diskData=await FileSystemService.loadMeetings();
+        diskList=diskData.map(d=>({...d.meeting,_fromDisk:true,_diskData:d})).filter(m=>!dbIds.has(m.id));
+      }catch{}
+      const diskIds=new Set(diskList.map(m=>m.id));
+      const filteredSession=sessionList.filter(m=>!diskIds.has(m.id));
+      const merged=[...filteredSession,...diskList,...dbList].sort((a,b)=>new Date(b.date)-new Date(a.date));
       d({type:'SET_MEETINGS',p:merged});
     },
     openMeeting:async(m)=>{
-      // Prefer session store (has live transcript objects); fall back to DB
+      // Prefer session store → disk → DB
       const sess=sessionStore[m.id];
-      const t=sess?.transcript?.length?sess.transcript:(DB?await DB.transcripts.where('meetingId').equals(m.id).sortBy('startTime').catch(()=>[]):[]);
-      const notes=sess?.notes||(DB?(await DB.aiNotes.where('meetingId').equals(m.id).last().catch(()=>null))?.notes:null);
+      let t=[],notes=null;
+      if(sess?.transcript?.length){
+        t=sess.transcript;notes=sess.notes||null;
+      } else if(m._fromDisk&&m._diskData){
+        t=m._diskData.transcript||[];notes=m._diskData.notes||null;
+      } else if(DB){
+        t=await DB.transcripts.where('meetingId').equals(m.id).sortBy('startTime').catch(()=>[]);
+        notes=(await DB.aiNotes.where('meetingId').equals(m.id).last().catch(()=>null))?.notes||null;
+      }
       d({type:'SET_SELECTED',p:{meeting:m,transcript:t,notes}});
       d({type:'SET_VIEW',p:VIEWS.DETAIL});
     },
@@ -764,6 +1018,8 @@ grid:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="curr
 user:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
 eye:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
 info:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>,
+folder:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>,
+hdd:<svg style={p} className={cls} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>,
 };return ic[n]||<span style={p}>{n}</span>;};
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -810,47 +1066,47 @@ function Onboarding(){
   ];
 
   return(
-    <div style={{minHeight:'100vh',background:'linear-gradient(135deg,#0f172a 0%,#1e1b4b 50%,#0f172a 100%)',display:'flex',alignItems:'center',justifyContent:'center',padding:'24px'}}>
+    <div style={{minHeight:'100vh',background:'var(--bg)',display:'flex',alignItems:'center',justifyContent:'center',padding:'24px'}}>
       <div style={{width:'100%',maxWidth:'560px'}}>
         {/* Logo */}
         <div style={{textAlign:'center',marginBottom:'32px'}}>
           <div style={{width:'56px',height:'56px',background:'linear-gradient(135deg,#6366f1,#8b5cf6)',borderRadius:'16px',display:'inline-flex',alignItems:'center',justifyContent:'center',marginBottom:'16px',fontSize:'28px'}}>🎙️</div>
           <div style={{fontSize:'1.5rem',fontWeight:'800',background:'linear-gradient(90deg,#818cf8,#c084fc)',WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent'}}>AI Meeting Facilitator</div>
-          <div style={{color:'#64748b',fontSize:'.875rem',marginTop:'4px'}}>Enterprise Meeting Intelligence</div>
+          <div style={{color:'var(--txt-3)',fontSize:'.875rem',marginTop:'4px'}}>Enterprise Meeting Intelligence</div>
         </div>
 
         {/* Step indicator */}
         <div style={{display:'flex',justifyContent:'center',gap:'8px',marginBottom:'32px'}}>
           {steps.map((_,i)=>(
-            <div key={i} style={{width:i===step?32:8,height:8,borderRadius:4,background:i<=step?'#6366f1':'#1e293b',transition:'all .3s'}}/>
+            <div key={i} style={{width:i===step?32:8,height:8,borderRadius:4,background:i<=step?'#6366f1':'var(--bg-3)',transition:'all .3s'}}/>
           ))}
         </div>
 
-        <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:'20px',padding:'32px',boxShadow:'0 25px 60px rgba(0,0,0,.5)'}}>
+        <div style={{background:'var(--bg-1)',border:'1px solid var(--border)',borderRadius:'20px',padding:'32px',boxShadow:'0 25px 60px rgba(0,0,0,.5)'}}>
           <div style={{marginBottom:'24px'}}>
-            <h2 style={{fontSize:'1.25rem',fontWeight:'700',color:'#e2e8f0',margin:0}}>{steps[step].title}</h2>
-            <p style={{color:'#64748b',fontSize:'.875rem',marginTop:'6px',marginBottom:0}}>{steps[step].sub}</p>
+            <h2 style={{fontSize:'1.25rem',fontWeight:'700',color:'var(--txt)',margin:0}}>{steps[step].title}</h2>
+            <p style={{color:'var(--txt-3)',fontSize:'.875rem',marginTop:'6px',marginBottom:0}}>{steps[step].sub}</p>
           </div>
 
           {step===0&&(
             <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
               <div>
-                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>YOUR NAME *</label>
+                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>YOUR NAME *</label>
                 <input className="inp" placeholder="e.g. Alex Johnson" value={form.userName} onChange={set('userName')}/>
               </div>
               <div>
-                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>ORGANIZATION</label>
+                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>ORGANIZATION</label>
                 <input className="inp" placeholder="e.g. Acme Corp" value={form.organization} onChange={set('organization')}/>
               </div>
               <div>
-                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>DEPARTMENT</label>
+                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>DEPARTMENT</label>
                 <input className="inp" placeholder="e.g. Engineering" value={form.department} onChange={set('department')}/>
               </div>
-              <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'14px',marginTop:'8px'}}>
+              <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'14px',marginTop:'8px'}}>
                 <div style={{display:'flex',gap:'10px',alignItems:'flex-start'}}>
                   <Ic n="shield" sz={18} cls="" style={{color:'#6366f1',flexShrink:0,marginTop:'2px'}}/>
-                  <div style={{fontSize:'.8rem',color:'#64748b',lineHeight:'1.5'}}>
-                    <span style={{color:'#94a3b8',fontWeight:'600'}}>Privacy First:</span> All recordings and transcripts are stored locally in your browser. Nothing is sent to external servers except Azure API calls you configure.
+                  <div style={{fontSize:'.8rem',color:'var(--txt-3)',lineHeight:'1.5'}}>
+                    <span style={{color:'var(--txt-3)',fontWeight:'600'}}>Privacy First:</span> All recordings and transcripts are stored locally in your browser. Nothing is sent to external servers except Azure API calls you configure.
                   </div>
                 </div>
               </div>
@@ -865,36 +1121,36 @@ function Onboarding(){
                   <div style={{color:'#f87171'}}>Run in the folder: <code style={{background:'rgba(0,0,0,.3)',padding:'1px 5px',borderRadius:'4px'}}>npx serve .</code> or <code style={{background:'rgba(0,0,0,.3)',padding:'1px 5px',borderRadius:'4px'}}>python -m http.server 8080</code> then open <strong>http://localhost:8080</strong></div>
                 </div>
               )}
-              <div style={{background:'#1e293b',border:'1px solid #f59e0b44',borderRadius:'10px',padding:'12px',fontSize:'.8rem',color:'#fbbf24'}}>
+              <div style={{background:'var(--bg-2)',border:'1px solid #f59e0b44',borderRadius:'10px',padding:'12px',fontSize:'.8rem',color:'#fbbf24'}}>
                 ⚠️ Keys stored locally in your browser using AES-GCM encryption. For enterprise production, use a secure backend token broker.
               </div>
               <div>
-                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>AZURE OPENAI ENDPOINT *</label>
+                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>AZURE OPENAI ENDPOINT *</label>
                 <input className="inp" placeholder="https://your-resource.openai.azure.com" value={form.azureEndpoint} onChange={set('azureEndpoint')}/>
               </div>
               <div>
-                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>AZURE API KEY *</label>
+                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>AZURE API KEY *</label>
                 <div style={{position:'relative'}}>
                   <input className="inp" type={showKey?'text':'password'} placeholder="••••••••••••••••••••••••••••••••" value={form.azureApiKey} onChange={set('azureApiKey')} style={{paddingRight:'42px'}}/>
-                  <button onClick={()=>setShowKey(v=>!v)} style={{position:'absolute',right:'12px',top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',color:'#64748b',padding:0}}>
+                  <button onClick={()=>setShowKey(v=>!v)} style={{position:'absolute',right:'12px',top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',color:'var(--txt-3)',padding:0}}>
                     <Ic n={showKey?'eye':'eye'} sz={16}/>
                   </button>
                 </div>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px'}}>
                 <div>
-                  <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>WHISPER DEPLOYMENT *</label>
+                  <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>WHISPER DEPLOYMENT *</label>
                   <input className="inp" placeholder="whisper" value={form.whisperDeployment} onChange={set('whisperDeployment')}/>
                 </div>
                 <div>
-                  <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>CHAT DEPLOYMENT *</label>
+                  <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>CHAT DEPLOYMENT *</label>
                   <input className="inp" placeholder="gpt-4o" value={form.chatDeployment} onChange={set('chatDeployment')}/>
                 </div>
               </div>
               <div>
-                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>API VERSION <span style={{fontWeight:'400',color:'#475569'}}>(REST API version, not model version)</span></label>
+                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>API VERSION <span style={{fontWeight:'400',color:'var(--txt-2)'}}>(REST API version, not model version)</span></label>
                 <input className="inp" placeholder="2025-01-01-preview" value={form.apiVersion} onChange={set('apiVersion')}/>
-                <div style={{fontSize:'.72rem',color:'#475569',marginTop:'4px'}}>Use <code>2025-01-01-preview</code> for Azure AI Foundry models. Do NOT paste the model deployment version here.</div>
+                <div style={{fontSize:'.72rem',color:'var(--txt-2)',marginTop:'4px'}}>Use <code>2025-01-01-preview</code> for Azure AI Foundry models. Do NOT paste the model deployment version here.</div>
               </div>
               <div style={{display:'flex',gap:'10px'}}>
                 <button className="btn btn-ghost btn-sm" style={{flex:1}} onClick={testWhisper} disabled={!form.azureEndpoint||!form.azureApiKey||!form.whisperDeployment||testing.whisper}>
@@ -912,25 +1168,25 @@ function Onboarding(){
           {step===2&&(
             <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
               <div>
-                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>PREFERRED LANGUAGE</label>
+                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>PREFERRED LANGUAGE</label>
                 <select className="inp" value={form.preferredLanguage} onChange={set('preferredLanguage')} style={{cursor:'pointer'}}>
                   {[['en','English'],['es','Spanish'],['fr','French'],['de','German'],['it','Italian'],['pt','Portuguese'],['zh','Chinese'],['ja','Japanese'],['ko','Korean'],['ar','Arabic'],['auto','Auto-detect']].map(([v,l])=><option key={v} value={v}>{l}</option>)}
                 </select>
               </div>
               <div>
-                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>DEFAULT MEETING TEMPLATE</label>
+                <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>DEFAULT MEETING TEMPLATE</label>
                 <select className="inp" value={form.defaultTemplate} onChange={set('defaultTemplate')} style={{cursor:'pointer'}}>
                   {Object.entries(TEMPLATES).map(([k,t])=><option key={k} value={k}>{t.icon} {t.label}</option>)}
                 </select>
               </div>
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',background:'#1e293b',border:'1px solid #334155',borderRadius:'10px',padding:'14px'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'10px',padding:'14px'}}>
                 <div>
-                  <div style={{fontWeight:'600',fontSize:'.875rem',color:'#e2e8f0'}}>Dark Mode</div>
-                  <div style={{fontSize:'.75rem',color:'#64748b'}}>Use dark theme throughout the app</div>
+                  <div style={{fontWeight:'600',fontSize:'.875rem',color:'var(--txt)'}}>Dark Mode</div>
+                  <div style={{fontSize:'.75rem',color:'var(--txt-3)'}}>Use dark theme throughout the app</div>
                 </div>
                 <label style={{position:'relative',display:'inline-block',width:44,height:24,cursor:'pointer'}}>
                   <input type="checkbox" checked={form.darkMode!=='false'} onChange={e=>setForm(f=>({...f,darkMode:String(e.target.checked)}))} style={{opacity:0,width:0,height:0}}/>
-                  <span style={{position:'absolute',inset:0,background:form.darkMode!=='false'?'#6366f1':'#334155',borderRadius:12,transition:'background .2s'}}/>
+                  <span style={{position:'absolute',inset:0,background:form.darkMode!=='false'?'#6366f1':'var(--border-2)',borderRadius:12,transition:'background .2s'}}/>
                   <span style={{position:'absolute',top:3,left:form.darkMode!=='false'?22:3,width:18,height:18,background:'#fff',borderRadius:'50%',transition:'left .2s'}}/>
                 </label>
               </div>
@@ -939,20 +1195,20 @@ function Onboarding(){
 
           {step===3&&(
             <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
-              <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'16px',fontSize:'.85rem',color:'#94a3b8',lineHeight:'1.7'}}>
-                <p style={{margin:'0 0 12px',fontWeight:'700',color:'#e2e8f0',fontSize:'.9rem'}}>📋 Consent & Privacy Notice</p>
-                <p style={{margin:'0 0 8px'}}>This application will <strong style={{color:'#e2e8f0'}}>record audio</strong> from your microphone and optionally from your screen or tab. Transcription is performed via Azure Cognitive Services.</p>
+              <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'16px',fontSize:'.85rem',color:'var(--txt-3)',lineHeight:'1.7'}}>
+                <p style={{margin:'0 0 12px',fontWeight:'700',color:'var(--txt)',fontSize:'.9rem'}}>📋 Consent & Privacy Notice</p>
+                <p style={{margin:'0 0 8px'}}>This application will <strong style={{color:'var(--txt)'}}>record audio</strong> from your microphone and optionally from your screen or tab. Transcription is performed via Azure Cognitive Services.</p>
                 <p style={{margin:'0 0 8px'}}>Before using this tool in a meeting:</p>
                 <ul style={{margin:'0 0 12px',paddingLeft:'18px'}}>
                   <li>Inform all participants that the meeting is being recorded</li>
                   <li>Obtain explicit consent as required by your organization's policy and applicable law</li>
                   <li>Comply with GDPR, CCPA, or other regulations applicable to your jurisdiction</li>
                 </ul>
-                <p style={{margin:0,fontSize:'.8rem',color:'#64748b'}}>All data is stored locally in your browser. Audio is only sent to your configured Azure endpoint for transcription.</p>
+                <p style={{margin:0,fontSize:'.8rem',color:'var(--txt-3)'}}>All data is stored locally in your browser. Audio is only sent to your configured Azure endpoint for transcription.</p>
               </div>
-              <label style={{display:'flex',alignItems:'flex-start',gap:'12px',cursor:'pointer',padding:'14px',background:'#1e293b',border:`1px solid ${form.consentAcknowledged==='true'?'#4f46e5':'#334155'}`,borderRadius:'10px',transition:'border-color .15s'}}>
+              <label style={{display:'flex',alignItems:'flex-start',gap:'12px',cursor:'pointer',padding:'14px',background:'var(--bg-2)',border:`1px solid ${form.consentAcknowledged==='true'?'#4f46e5':'var(--border-2)'}`,borderRadius:'10px',transition:'border-color .15s'}}>
                 <input type="checkbox" checked={form.consentAcknowledged==='true'} onChange={e=>setForm(f=>({...f,consentAcknowledged:String(e.target.checked)}))} style={{marginTop:'2px',width:16,height:16,accentColor:'#6366f1',cursor:'pointer'}}/>
-                <span style={{fontSize:'.875rem',color:'#e2e8f0',lineHeight:'1.5'}}>I understand my responsibilities regarding recording consent and will ensure all participants are informed before recording any meeting.</span>
+                <span style={{fontSize:'.875rem',color:'var(--txt)',lineHeight:'1.5'}}>I understand my responsibilities regarding recording consent and will ensure all participants are informed before recording any meeting.</span>
               </label>
             </div>
           )}
@@ -986,7 +1242,28 @@ function Settings(){
   const[tResult,setTResult]=useState({w:null,c:null});
   const[showKey,setShowKey]=useState(false);
   const[saving,setSaving]=useState(false);
+  const[folderName,setFolderName]=useState(null);
+  const[folderLoading,setFolderLoading]=useState(false);
   const set=k=>e=>setForm(f=>({...f,[k]:e.target.value}));
+
+  // Load current folder name on mount
+  useEffect(()=>{FileSystemService.getFolderName().then(n=>setFolderName(n)).catch(()=>{});},[]);
+
+  const pickFolder=async()=>{
+    setFolderLoading(true);
+    try{
+      const h=await FileSystemService.pickFolder();
+      setFolderName(h.name);
+      Toast.success(`Workspace folder set: ${h.name}`);
+    }catch(e){
+      if(!e.message.includes('aborted')&&!e.message.includes('dismissed')) Toast.error(e.message);
+    }finally{setFolderLoading(false);}
+  };
+  const clearFolder=async()=>{
+    await FileSystemService.clearFolder();
+    setFolderName(null);
+    Toast.info('Workspace folder cleared.');
+  };
 
   const testW=async()=>{setTesting(t=>({...t,w:true}));setTResult(r=>({...r,w:null}));try{await AzureWhisper.testConnection(form);setTResult(r=>({...r,w:'ok'}));}catch(e){setTResult(r=>({...r,w:e.message}));}finally{setTesting(t=>({...t,w:false}));}};
   const testC=async()=>{setTesting(t=>({...t,c:true}));setTResult(r=>({...r,c:null}));try{await AzureChat.testConnection(form);setTResult(r=>({...r,c:'ok'}));}catch(e){setTResult(r=>({...r,c:e.message}));}finally{setTesting(t=>({...t,c:false}));}};
@@ -994,24 +1271,24 @@ function Settings(){
 
   const Sec=({title,children})=>(
     <div style={{marginBottom:'28px'}}>
-      <h3 style={{fontSize:'.78rem',fontWeight:'700',color:'#6366f1',letterSpacing:'.08em',textTransform:'uppercase',marginBottom:'16px',paddingBottom:'8px',borderBottom:'1px solid #1e293b'}}>{title}</h3>
+      <h3 style={{fontSize:'.78rem',fontWeight:'700',color:'#6366f1',letterSpacing:'.08em',textTransform:'uppercase',marginBottom:'16px',paddingBottom:'8px',borderBottom:'1px solid var(--border)'}}>{title}</h3>
       {children}
     </div>
   );
   const Field=({label,help,children})=>(
     <div style={{marginBottom:'14px'}}>
-      <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>{label}</label>
+      <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>{label}</label>
       {children}
-      {help&&<p style={{fontSize:'.75rem',color:'#475569',marginTop:'5px'}}>{help}</p>}
+      {help&&<p style={{fontSize:'.75rem',color:'var(--txt-2)',marginTop:'5px'}}>{help}</p>}
     </div>
   );
 
   return(
     <div style={{padding:'28px',maxWidth:'720px',margin:'0 auto',paddingBottom:'60px'}}>
-      <h1 style={{fontSize:'1.35rem',fontWeight:'700',marginBottom:'24px',color:'#e2e8f0'}}>Settings</h1>
+      <h1 style={{fontSize:'1.35rem',fontWeight:'700',marginBottom:'24px',color:'var(--txt)'}}>Settings</h1>
 
       <Sec title="Azure OpenAI">
-        <div style={{background:'#1e293b',border:'1px solid #f59e0b44',borderRadius:'10px',padding:'12px 14px',fontSize:'.8rem',color:'#fbbf24',marginBottom:'18px',display:'flex',gap:'8px',alignItems:'flex-start'}}>
+        <div style={{background:'var(--bg-2)',border:'1px solid #f59e0b44',borderRadius:'10px',padding:'12px 14px',fontSize:'.8rem',color:'#fbbf24',marginBottom:'18px',display:'flex',gap:'8px',alignItems:'flex-start'}}>
           <Ic n="info" sz={16} cls="" style={{flexShrink:0,marginTop:'1px'}}/>
           <span>Keys are stored locally using AES-GCM encryption. For enterprise production, use a secure backend token broker instead of direct browser storage.</span>
         </div>
@@ -1019,7 +1296,7 @@ function Settings(){
         <Field label="API KEY">
           <div style={{position:'relative'}}>
             <input className="inp" type={showKey?'text':'password'} placeholder="••••••••••••••••••••••••••••••••" value={form.azureApiKey} onChange={set('azureApiKey')} style={{paddingRight:'42px'}}/>
-            <button onClick={()=>setShowKey(v=>!v)} style={{position:'absolute',right:'12px',top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',color:'#64748b',padding:0}}><Ic n="eye" sz={16}/></button>
+            <button onClick={()=>setShowKey(v=>!v)} style={{position:'absolute',right:'12px',top:'50%',transform:'translateY(-50%)',background:'none',border:'none',cursor:'pointer',color:'var(--txt-3)',padding:0}}><Ic n="eye" sz={16}/></button>
           </div>
         </Field>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px'}}>
@@ -1068,6 +1345,45 @@ function Settings(){
         </div>
       </Sec>
 
+      <Sec title="Workspace Folder — Auto-save to Computer">
+        <div style={{background:'var(--bg-2)',border:`1.5px solid ${folderName?'rgba(16,185,129,.4)':'var(--border-2)'}`,borderRadius:'12px',padding:'16px',marginBottom:'12px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'12px',flexWrap:'wrap'}}>
+            <div style={{width:40,height:40,borderRadius:'10px',background:folderName?'rgba(16,185,129,.12)':'var(--bg-3)',border:`1px solid ${folderName?'rgba(16,185,129,.3)':'var(--border-2)'}`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <Ic n="folder" sz={20} cls="" style={{color:folderName?'#34d399':'var(--txt-3)'}}/>
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:'600',fontSize:'.875rem',color:'var(--txt)',marginBottom:'2px'}}>
+                {folderName?<>📁 <span style={{color:'#34d399'}}>{folderName}</span></>:'No folder selected'}
+              </div>
+              <div style={{fontSize:'.75rem',color:'var(--txt-3)',lineHeight:'1.4'}}>
+                {folderName
+                  ?'Meetings are automatically saved here after recording ends — transcript.md, notes.json, audio.webm. Unlimited storage, no browser limits.'
+                  :'Pick a folder on your computer. Every finished meeting will be saved there automatically — unlimited history.'}
+              </div>
+            </div>
+            <div style={{display:'flex',gap:'8px',flexShrink:0}}>
+              {folderName&&(
+                <button className="btn btn-ghost btn-sm" onClick={clearFolder}>
+                  <Ic n="x" sz={13}/> Clear
+                </button>
+              )}
+              <button className="btn btn-secondary btn-sm" onClick={pickFolder} disabled={folderLoading||!FileSystemService.isSupported()}>
+                {folderLoading?<Spin sz={13}/>:<Ic n="folder" sz={13}/>}
+                {folderName?'Change Folder':'Pick Folder'}
+              </button>
+            </div>
+          </div>
+          {!FileSystemService.isSupported()&&(
+            <div style={{marginTop:'10px',fontSize:'.75rem',color:'#fbbf24',background:'rgba(245,158,11,.08)',border:'1px solid rgba(245,158,11,.2)',borderRadius:'8px',padding:'8px 12px'}}>
+              ⚠️ File System Access API not supported in this browser. Use Edge or Chrome 86+.
+            </div>
+          )}
+        </div>
+        <div style={{fontSize:'.75rem',color:'var(--txt-3)',lineHeight:'1.5',padding:'0 2px'}}>
+          <strong style={{color:'var(--txt-2)'}}>How it works:</strong> After each meeting ends and notes are generated, the app writes a folder like <code style={{background:'var(--bg-3)',padding:'1px 5px',borderRadius:'4px',fontSize:'.72rem'}}>Meeting_Title_2026-05-24/</code> containing notes.md, transcript.txt, data.json, and audio.webm to your chosen folder. Browser IndexedDB is then pruned to stay lean. Meetings on disk appear in your Archive automatically.
+        </div>
+      </Sec>
+
       <Sec title="Privacy & Retention">
         <Field label="LOCAL RETENTION (days)" help="Meetings older than this are flagged for deletion">
           <input className="inp" type="number" min="1" max="3650" value={form.retentionDays} onChange={set('retentionDays')}/>
@@ -1082,8 +1398,8 @@ function Settings(){
             ))}
           </div>
         </div>
-        <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'14px',fontSize:'.82rem',color:'#64748b',lineHeight:'1.6'}}>
-          <Ic n="shield" sz={14}/> <strong style={{color:'#94a3b8'}}>Data stays local.</strong> Recordings, transcripts, and notes are stored in your browser's IndexedDB. Azure API calls are the only external network requests.
+        <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'14px',fontSize:'.82rem',color:'var(--txt-3)',lineHeight:'1.6'}}>
+          <Ic n="shield" sz={14}/> <strong style={{color:'var(--txt-3)'}}>Data stays local.</strong> Recordings, transcripts, and notes are stored in your browser's IndexedDB. Azure API calls are the only external network requests.
         </div>
       </Sec>
 
@@ -1133,7 +1449,7 @@ function Sidebar(){
       </nav>
 
       {/* Collapse toggle + user */}
-      <div style={{padding:'12px 8px',borderTop:'1px solid #1e293b',display:'flex',flexDirection:'column',gap:'8px'}}>
+      <div style={{padding:'12px 8px',borderTop:'1px solid var(--border)',display:'flex',flexDirection:'column',gap:'8px'}}>
         {!col&&s.settings.userName&&(
           <div style={{display:'flex',alignItems:'center',gap:'8px',padding:'8px 10px',borderRadius:'10px',background:'var(--bg-2)',border:'1.5px solid var(--border-2)'}}>
             <div style={{width:28,height:28,borderRadius:'50%',background:'linear-gradient(135deg,#6366f1,#8b5cf6)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'12px',fontWeight:'700',color:'#fff',flexShrink:0}}>
@@ -1145,7 +1461,7 @@ function Sidebar(){
             </div>
           </div>
         )}
-        <button onClick={()=>d({type:'TOGGLE_SIDEBAR'})} style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'8px',borderRadius:'8px',background:'none',border:'none',cursor:'pointer',color:'#475569',width:'100%'}} title={col?'Expand':'Collapse'}>
+        <button onClick={()=>d({type:'TOGGLE_SIDEBAR'})} style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'8px',borderRadius:'8px',background:'none',border:'none',cursor:'pointer',color:'var(--txt-2)',width:'100%'}} title={col?'Expand':'Collapse'}>
           <Ic n={col?'chevR':'chevL'} sz={16}/>
         </button>
       </div>
@@ -1168,9 +1484,9 @@ function TopBar(){
   return(
     <div style={{height:56,background:'var(--topbar)',borderBottom:'1.5px solid var(--border-2)',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0 20px',flexShrink:0,zIndex:10,boxShadow:'var(--shadow)'}}>
       <div style={{display:'flex',alignItems:'center',gap:'14px'}}>
-        <span style={{fontSize:'.95rem',fontWeight:'600',color:'#e2e8f0'}}>{viewLabels[s.view]||'AI Meeting Facilitator'}</span>
+        <span style={{fontSize:'.95rem',fontWeight:'600',color:'var(--txt)'}}>{viewLabels[s.view]||'AI Meeting Facilitator'}</span>
         {s.currentMeeting&&(
-          <span style={{fontSize:'.8rem',color:'#64748b',maxWidth:240,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>— {s.currentMeeting.title}</span>
+          <span style={{fontSize:'.8rem',color:'var(--txt-3)',maxWidth:240,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>— {s.currentMeeting.title}</span>
         )}
       </div>
 
@@ -1196,14 +1512,23 @@ function TopBar(){
           <span style={{fontSize:'.72rem',fontWeight:'600',color:'var(--txt-3)'}}>LOCAL ONLY</span>
         </div>
 
+        {/* Attention badge */}
+        {s.attentionAlerts?.length>0&&!s.attentionDismissed&&(
+          <button onClick={()=>d({type:'DISMISS_ATTENTION'})} style={{display:'flex',alignItems:'center',gap:'5px',background:'rgba(239,68,68,.12)',border:'1.5px solid rgba(239,68,68,.4)',borderRadius:'7px',padding:'4px 10px',cursor:'pointer',animation:'attentionPulse 1.4s ease-in-out infinite',fontFamily:'inherit'}}>
+            <span style={{fontSize:'13px'}}>🤚</span>
+            <span style={{fontSize:'.72rem',fontWeight:'700',color:'#f87171'}}>ATTENTION</span>
+            {s.attentionAlerts.length>1&&<span style={{background:'#ef4444',color:'#fff',borderRadius:'999px',width:16,height:16,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'.65rem',fontWeight:'700'}}>{s.attentionAlerts.length}</span>}
+          </button>
+        )}
+
         {/* Status */}
         {s.isTranscribing&&(
-          <div style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'.78rem',color:'#94a3b8'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'.78rem',color:'var(--txt-3)'}}>
             <Spin sz={13}/> Transcribing…
           </div>
         )}
         {s.isGeneratingNotes&&(
-          <div style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'.78rem',color:'#a5b4fc'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'.78rem',color:'var(--brand-t)'}}>
             <Spin sz={13}/> Generating notes…
           </div>
         )}
@@ -1227,37 +1552,37 @@ function NewMeetingModal({onStart,onClose}){
 
   return(
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:'20px'}}>
-      <div style={{background:'#0f172a',border:'1px solid #334155',borderRadius:'18px',padding:'28px',width:'100%',maxWidth:'480px',boxShadow:'0 25px 60px rgba(0,0,0,.6)'}}>
+      <div style={{background:'var(--bg-1)',border:'1px solid var(--border-2)',borderRadius:'18px',padding:'28px',width:'100%',maxWidth:'480px',boxShadow:'0 25px 60px rgba(0,0,0,.6)'}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'22px'}}>
-          <h2 style={{margin:0,fontSize:'1.1rem',fontWeight:'700',color:'#e2e8f0'}}>New Meeting</h2>
-          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'#64748b',padding:'4px'}}><Ic n="x" sz={18}/></button>
+          <h2 style={{margin:0,fontSize:'1.1rem',fontWeight:'700',color:'var(--txt)'}}>New Meeting</h2>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'var(--txt-3)',padding:'4px'}}><Ic n="x" sz={18}/></button>
         </div>
 
         <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
           <div>
-            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>MEETING TITLE</label>
+            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>MEETING TITLE</label>
             <input className="inp" placeholder={`Meeting — ${new Date().getDate()} ${new Date().toLocaleString('default',{month:'short'})} ${new Date().getFullYear()} ${String(new Date().getHours()).padStart(2,'0')}:${String(new Date().getMinutes()).padStart(2,'0')}`} value={title} onChange={e=>setTitle(e.target.value)} autoFocus/>
           </div>
           <div>
-            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'8px'}}>TEMPLATE</label>
+            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'8px'}}>TEMPLATE</label>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
               {Object.entries(TEMPLATES).map(([k,t])=>(
-                <div key={k} onClick={()=>setTemplate(k)} style={{padding:'10px 12px',borderRadius:'9px',border:`1px solid ${template===k?t.color+'88':'#334155'}`,background:template===k?t.color+'18':'#1e293b',cursor:'pointer',display:'flex',alignItems:'center',gap:'8px',transition:'all .15s'}}>
+                <div key={k} onClick={()=>setTemplate(k)} style={{padding:'10px 12px',borderRadius:'9px',border:`1px solid ${template===k?t.color+'88':'var(--border-2)'}`,background:template===k?t.color+'18':'var(--bg-2)',cursor:'pointer',display:'flex',alignItems:'center',gap:'8px',transition:'all .15s'}}>
                   <span style={{fontSize:'16px'}}>{t.icon}</span>
-                  <span style={{fontSize:'.8rem',fontWeight:'600',color:template===k?'#e2e8f0':'#64748b'}}>{t.label}</span>
+                  <span style={{fontSize:'.8rem',fontWeight:'600',color:template===k?'var(--txt)':'var(--txt-3)'}}>{t.label}</span>
                 </div>
               ))}
             </div>
           </div>
           <div>
-            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'#94a3b8',marginBottom:'6px'}}>PARTICIPANTS</label>
+            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>PARTICIPANTS</label>
             <div style={{display:'flex',gap:'8px',marginBottom:'8px'}}>
               <input className="inp" placeholder="Add participant name" value={pInput} onChange={e=>setPInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();addP();}}} style={{flex:1}}/>
               <button className="btn btn-secondary btn-sm" onClick={addP}><Ic n="plus" sz={14}/></button>
             </div>
             <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
               {participants.map(p=>(
-                <span key={p} style={{display:'inline-flex',alignItems:'center',gap:'5px',padding:'4px 10px',borderRadius:'999px',background:'rgba(99,102,241,.15)',border:'1px solid rgba(99,102,241,.3)',fontSize:'.8rem',color:'#a5b4fc'}}>
+                <span key={p} style={{display:'inline-flex',alignItems:'center',gap:'5px',padding:'4px 10px',borderRadius:'999px',background:'rgba(99,102,241,.15)',border:'1px solid rgba(99,102,241,.3)',fontSize:'.8rem',color:'var(--brand-t)'}}>
                   {p} <button onClick={()=>removeP(p)} style={{background:'none',border:'none',cursor:'pointer',color:'#6366f1',padding:0,display:'flex'}}><Ic n="x" sz={12}/></button>
                 </span>
               ))}
@@ -1279,15 +1604,15 @@ function NewMeetingModal({onStart,onClose}){
 // ─── CAPTURE STATUS CARD ──────────────────────────────────────────────────────
 function CaptureCard({icon,label,active,hasAudio,onStart,onStop,description,loading}){
   return(
-    <div className="card" style={{flex:1,minWidth:140,background:active?'rgba(16,185,129,.06)':'#1e293b',borderColor:active?'rgba(16,185,129,.4)':'#334155',cursor:'pointer',userSelect:'none'}} onClick={active?onStop:onStart}>
+    <div className="card" style={{flex:1,minWidth:140,background:active?'rgba(16,185,129,.06)':'var(--bg-2)',borderColor:active?'rgba(16,185,129,.4)':'var(--border-2)',cursor:'pointer',userSelect:'none'}} onClick={active?onStop:onStart}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'8px'}}>
-        <div style={{width:36,height:36,borderRadius:'10px',background:active?'rgba(16,185,129,.15)':'#0f172a',display:'flex',alignItems:'center',justifyContent:'center',border:`1px solid ${active?'rgba(16,185,129,.3)':'#1e293b'}`}}>
-          {loading?<Spin sz={16}/>:<Ic n={icon} sz={18} cls="" style={{color:active?'#34d399':'#64748b'}}/>}
+        <div style={{width:36,height:36,borderRadius:'10px',background:active?'rgba(16,185,129,.15)':'var(--bg-1)',display:'flex',alignItems:'center',justifyContent:'center',border:`1px solid ${active?'rgba(16,185,129,.3)':'var(--border)'}`}}>
+          {loading?<Spin sz={16}/>:<Ic n={icon} sz={18} cls="" style={{color:active?'#34d399':'var(--txt-3)'}}/>}
         </div>
         <div style={{width:8,height:8,borderRadius:'50%',background:active?'#10b981':'#374151',boxShadow:active?'0 0 6px #10b981':'none',transition:'all .3s'}}/>
       </div>
-      <div style={{fontSize:'.85rem',fontWeight:'700',color:active?'#a7f3d0':'#e2e8f0',marginBottom:'3px'}}>{label}</div>
-      <div style={{fontSize:'.72rem',color:active?'#6ee7b7':'#475569'}}>{active?(hasAudio!==undefined?hasAudio?'Audio captured':'Active (no audio)':'Active — click to stop'):description}</div>
+      <div style={{fontSize:'.85rem',fontWeight:'700',color:active?'#a7f3d0':'var(--txt)',marginBottom:'3px'}}>{label}</div>
+      <div style={{fontSize:'.72rem',color:active?'#6ee7b7':'var(--txt-3)'}}>{active?(hasAudio!==undefined?hasAudio?'Audio captured':'Active (no audio)':'Active — click to stop'):description}</div>
     </div>
   );
 }
@@ -1298,22 +1623,99 @@ function ParticipantPanel(){
   const[inp,setInp]=useState('');
   const add=()=>{const v=inp.trim();if(v){d({type:'ADD_PARTICIPANT',p:v});setInp('');}};
   return(
-    <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'14px'}}>
+    <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'14px'}}>
       <div style={{fontSize:'.78rem',fontWeight:'700',color:'#6366f1',letterSpacing:'.06em',marginBottom:'10px',textTransform:'uppercase'}}>Participants</div>
       <div style={{display:'flex',gap:'7px',marginBottom:'8px'}}>
         <input className="inp" style={{flex:1,padding:'6px 10px',fontSize:'.8rem'}} placeholder="Add name…" value={inp} onChange={e=>setInp(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();add();}}}/>
         <button className="btn btn-secondary btn-sm" onClick={add}><Ic n="plus" sz={13}/></button>
       </div>
       <div style={{display:'flex',flexWrap:'wrap',gap:'5px'}}>
-        {s.participants.length===0?<span style={{fontSize:'.75rem',color:'#475569'}}>No participants yet</span>:
+        {s.participants.length===0?<span style={{fontSize:'.75rem',color:'var(--txt-2)'}}>No participants yet</span>:
           s.participants.map(p=>(
-            <span key={p} style={{display:'inline-flex',alignItems:'center',gap:'4px',padding:'3px 9px',borderRadius:'999px',background:'rgba(99,102,241,.12)',border:'1px solid rgba(99,102,241,.25)',fontSize:'.78rem',color:'#a5b4fc'}}>
+            <span key={p} style={{display:'inline-flex',alignItems:'center',gap:'4px',padding:'3px 9px',borderRadius:'999px',background:'rgba(99,102,241,.12)',border:'1px solid rgba(99,102,241,.25)',fontSize:'.78rem',color:'var(--brand-t)'}}>
               {p}
               <button onClick={()=>d({type:'SET_PARTICIPANTS',p:s.participants.filter(x=>x!==p)})} style={{background:'none',border:'none',cursor:'pointer',color:'#6366f1',padding:0,display:'flex'}}><Ic n="x" sz={11}/></button>
             </span>
           ))
         }
       </div>
+    </div>
+  );
+}
+
+// ─── ATTENTION CARD ──────────────────────────────────────────────────────────
+function AttentionCard(){
+  const{s,d}=useApp();
+  const alerts=s.attentionAlerts;
+  if(!alerts||alerts.length===0||s.attentionDismissed) return null;
+  const latest=alerts[0];
+  let aiData=null;
+  try{if(latest.aiSummary&&typeof latest.aiSummary==='object')aiData=latest.aiSummary;}catch{}
+
+  return(
+    <div className="attention-pulse" style={{
+      background:'rgba(239,68,68,.06)',
+      border:'2px solid #ef4444',
+      borderRadius:'14px',
+      padding:'16px',
+      animation:'attentionSlide .3s ease-out',
+      position:'relative',
+    }}>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'12px'}}>
+        <div style={{
+          width:38,height:38,borderRadius:'50%',
+          background:'rgba(239,68,68,.15)',border:'2px solid #ef4444',
+          display:'flex',alignItems:'center',justifyContent:'center',
+          fontSize:'18px',flexShrink:0,
+          animation:'attentionPulse 1.4s ease-in-out infinite',
+        }}>🤚</div>
+        <div>
+          <div style={{fontWeight:'700',fontSize:'.9rem',color:'#ef4444'}}>
+            Attention! Your name was mentioned
+          </div>
+          <div style={{fontSize:'.72rem',color:'var(--txt-3)',marginTop:'2px'}}>
+            "{latest.matchedAlias}" detected · {new Date(latest.timestamp).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+            {alerts.length>1&&<span style={{marginLeft:'6px',background:'rgba(239,68,68,.15)',color:'#f87171',padding:'1px 7px',borderRadius:'999px',fontSize:'.7rem'}}>{alerts.length} mentions</span>}
+          </div>
+        </div>
+        <div style={{marginLeft:'auto',display:'flex',gap:'6px'}}>
+          <button onClick={()=>d({type:'CLEAR_ATTENTION'})} style={{background:'none',border:'1px solid var(--border-2)',borderRadius:'6px',cursor:'pointer',color:'var(--txt-3)',padding:'4px 8px',fontSize:'.73rem',fontFamily:'inherit'}}>
+            Clear all
+          </button>
+          <button onClick={()=>d({type:'DISMISS_ATTENTION'})} style={{background:'none',border:'none',cursor:'pointer',color:'var(--txt-3)',padding:'4px',display:'flex'}}>
+            <Ic n="x" sz={16}/>
+          </button>
+        </div>
+      </div>
+
+      {/* Transcript snippet */}
+      <div style={{background:'var(--bg-2)',border:'1px solid rgba(239,68,68,.3)',borderRadius:'10px',padding:'10px 14px',marginBottom:'10px'}}>
+        <div style={{fontSize:'.7rem',fontWeight:'700',color:'#f87171',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:'5px'}}>What was said</div>
+        <p style={{margin:0,fontSize:'.85rem',color:'var(--txt)',lineHeight:'1.6'}}>{latest.text}</p>
+      </div>
+
+      {/* AI context */}
+      {aiData?(
+        <div style={{display:'flex',gap:'10px'}}>
+          {aiData.whatWasSaid&&(
+            <div style={{flex:1,background:'rgba(99,102,241,.06)',border:'1px solid rgba(99,102,241,.2)',borderRadius:'10px',padding:'10px 12px'}}>
+              <div style={{fontSize:'.7rem',fontWeight:'700',color:'var(--brand-t)',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:'4px'}}>Context</div>
+              <p style={{margin:0,fontSize:'.82rem',color:'var(--txt-2)',lineHeight:'1.5'}}>{aiData.whatWasSaid}</p>
+            </div>
+          )}
+          {aiData.expectedAction&&(
+            <div style={{flex:1,background:'rgba(245,158,11,.06)',border:'1px solid rgba(245,158,11,.3)',borderRadius:'10px',padding:'10px 12px'}}>
+              <div style={{fontSize:'.7rem',fontWeight:'700',color:'#f59e0b',textTransform:'uppercase',letterSpacing:'.06em',marginBottom:'4px'}}>Expected from you</div>
+              <p style={{margin:0,fontSize:'.82rem',color:'var(--txt)',lineHeight:'1.5'}}>{aiData.expectedAction}</p>
+            </div>
+          )}
+        </div>
+      ):(
+        <div style={{fontSize:'.75rem',color:'var(--txt-3)',display:'flex',alignItems:'center',gap:'5px'}}>
+          <Spin sz={12}/> Getting AI context…
+        </div>
+      )}
     </div>
   );
 }
@@ -1381,33 +1783,33 @@ function LiveTranscript(){
     <div style={{display:'flex',flexDirection:'column',height:'100%'}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'12px'}}>
         <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
-          <div style={{fontSize:'.78rem',fontWeight:'700',color:'#94a3b8',letterSpacing:'.06em',textTransform:'uppercase'}}>Live Transcript</div>
+          <div style={{fontSize:'.78rem',fontWeight:'700',color:'var(--txt-3)',letterSpacing:'.06em',textTransform:'uppercase'}}>Live Transcript</div>
           {s.isTranscribing&&<div style={{display:'flex',alignItems:'center',gap:'5px',fontSize:'.72rem',color:'#6366f1'}}><Spin sz={11}/> transcribing</div>}
         </div>
         <div style={{display:'flex',gap:'6px'}}>
           {s.transcriptChunks.length>0&&<button className="btn btn-ghost btn-sm" onClick={copyAll}><Ic n="copy" sz={12}/> Copy</button>}
-          <span style={{fontSize:'.75rem',color:'#475569',display:'flex',alignItems:'center'}}>{s.transcriptChunks.length} chunks</span>
+          <span style={{fontSize:'.75rem',color:'var(--txt-2)',display:'flex',alignItems:'center'}}>{s.transcriptChunks.length} chunks</span>
         </div>
       </div>
 
       <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:'12px',paddingRight:'4px'}}>
         {s.transcriptChunks.length===0?(
-          <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:'#334155',textAlign:'center',padding:'32px'}}>
+          <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:'var(--txt-3)',textAlign:'center',padding:'32px'}}>
             <div style={{fontSize:'32px',marginBottom:'12px'}}>🎙️</div>
-            <div style={{fontSize:'.875rem',color:'#475569'}}>Transcript will appear here</div>
-            <div style={{fontSize:'.78rem',color:'#334155',marginTop:'4px'}}>Start recording to begin</div>
+            <div style={{fontSize:'.875rem',color:'var(--txt-2)'}}>Transcript will appear here</div>
+            <div style={{fontSize:'.78rem',color:'var(--txt-3)',marginTop:'4px'}}>Start recording to begin</div>
           </div>
         ):s.transcriptChunks.map((chunk)=>(
-          <div key={chunk.id} className="fade-slide" style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'10px',padding:'12px'}}>
+          <div key={chunk.id} className="fade-slide" style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'10px',padding:'12px'}}>
             <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:'8px',marginBottom:'6px'}}>
               <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
-                <span style={{fontSize:'.7rem',fontFamily:'monospace',color:'#475569',background:'#0f172a',padding:'2px 7px',borderRadius:'5px'}}>{ExportService.fmtT(chunk.startTime)}</span>
+                <span style={{fontSize:'.7rem',fontFamily:'monospace',color:'var(--txt-2)',background:'var(--bg-1)',padding:'2px 7px',borderRadius:'5px'}}>{ExportService.fmtT(chunk.startTime)}</span>
                 {chunk.speaker?(
-                  <span onClick={()=>{setEditingSpeaker(chunk.id);setSpeakerVal(chunk.speaker);}} style={{display:'inline-flex',alignItems:'center',gap:'4px',padding:'2px 9px',borderRadius:'999px',background:'rgba(99,102,241,.15)',border:'1px solid rgba(99,102,241,.3)',fontSize:'.73rem',fontWeight:'700',color:'#a5b4fc',cursor:'pointer'}}>
+                  <span onClick={()=>{setEditingSpeaker(chunk.id);setSpeakerVal(chunk.speaker);}} style={{display:'inline-flex',alignItems:'center',gap:'4px',padding:'2px 9px',borderRadius:'999px',background:'rgba(99,102,241,.15)',border:'1px solid rgba(99,102,241,.3)',fontSize:'.73rem',fontWeight:'700',color:'var(--brand-t)',cursor:'pointer'}}>
                     <Ic n="user" sz={11}/> {chunk.speaker}
                   </span>
                 ):(
-                  <button onClick={()=>{setEditingSpeaker(chunk.id);setSpeakerVal('');}} style={{display:'inline-flex',alignItems:'center',gap:'4px',padding:'2px 8px',borderRadius:'999px',background:'transparent',border:'1px dashed #334155',fontSize:'.73rem',color:'#475569',cursor:'pointer'}}>
+                  <button onClick={()=>{setEditingSpeaker(chunk.id);setSpeakerVal('');}} style={{display:'inline-flex',alignItems:'center',gap:'4px',padding:'2px 8px',borderRadius:'999px',background:'transparent',border:'1px dashed var(--border-2)',fontSize:'.73rem',color:'var(--txt-2)',cursor:'pointer'}}>
                     + speaker
                   </button>
                 )}
@@ -1423,7 +1825,7 @@ function LiveTranscript(){
               </div>
             ):null}
 
-            <p style={{margin:0,fontSize:'.875rem',color:chunk.text.startsWith('🔄')?'#64748b':chunk.text.startsWith('[Transcription')? '#fca5a5':'#e2e8f0',lineHeight:'1.6',fontStyle:chunk.text.startsWith('🔄')?'italic':'normal'}}>
+            <p style={{margin:0,fontSize:'.875rem',color:chunk.text.startsWith('🔄')?'var(--txt-3)':chunk.text.startsWith('[Transcription')? '#fca5a5':'var(--txt)',lineHeight:'1.6',fontStyle:chunk.text.startsWith('🔄')?'italic':'normal'}}>
               {chunk.text}
             </p>
           </div>
@@ -1453,8 +1855,8 @@ function AINotes(){
     <div style={{display:'flex',flexDirection:'column',height:'100%'}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'12px',flexWrap:'wrap',gap:'8px'}}>
         <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
-          <div style={{fontSize:'.78rem',fontWeight:'700',color:'#94a3b8',letterSpacing:'.06em',textTransform:'uppercase'}}>AI Notes</div>
-          {s.lastNotesAt&&<span style={{fontSize:'.7rem',color:'#334155'}}>Updated {new Date(s.lastNotesAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
+          <div style={{fontSize:'.78rem',fontWeight:'700',color:'var(--txt-3)',letterSpacing:'.06em',textTransform:'uppercase'}}>AI Notes</div>
+          {s.lastNotesAt&&<span style={{fontSize:'.7rem',color:'var(--txt-3)'}}>Updated {new Date(s.lastNotesAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
         </div>
         <div style={{display:'flex',gap:'6px'}}>
           {!empty&&<button className="btn btn-ghost btn-sm" onClick={copyNotes}><Ic n="copy" sz={12}/> Copy</button>}
@@ -1465,7 +1867,7 @@ function AINotes(){
       </div>
 
       {/* Tab bar */}
-      <div style={{display:'flex',gap:'4px',marginBottom:'14px',flexWrap:'wrap',background:'#0f172a',padding:'4px',borderRadius:'10px',border:'1px solid #1e293b'}}>
+      <div style={{display:'flex',gap:'4px',marginBottom:'14px',flexWrap:'wrap',background:'var(--bg-1)',padding:'4px',borderRadius:'10px',border:'1px solid var(--border)'}}>
         {[['summary','Summary'],['actions','Actions'],['decisions','Decisions'],['risks','Risks'],['email','Email'],['quality','Quality']].map(([t,l])=>(
           <button key={t} className={`tab${tab===t?' active':''}`} onClick={()=>setTab(t)} style={{flex:1,minWidth:60,textAlign:'center'}}>{l}</button>
         ))}
@@ -1473,14 +1875,14 @@ function AINotes(){
 
       <div style={{flex:1,overflowY:'auto',paddingRight:'4px'}}>
         {empty&&!s.isGeneratingNotes?(
-          <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100%',color:'#334155',textAlign:'center',padding:'32px'}}>
+          <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100%',color:'var(--txt-3)',textAlign:'center',padding:'32px'}}>
             <div style={{fontSize:'28px',marginBottom:'12px'}}>✨</div>
-            <div style={{fontSize:'.875rem',color:'#475569'}}>AI notes will appear here</div>
-            <div style={{fontSize:'.78rem',color:'#334155',marginTop:'4px'}}>Notes are auto-generated every 2 min or click Generate Notes</div>
+            <div style={{fontSize:'.875rem',color:'var(--txt-2)'}}>AI notes will appear here</div>
+            <div style={{fontSize:'.78rem',color:'var(--txt-3)',marginTop:'4px'}}>Notes are auto-generated every 2 min or click Generate Notes</div>
           </div>
         ):s.isGeneratingNotes&&empty?(
           <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100%',gap:'14px'}}>
-            <Spin sz={28}/><div style={{color:'#64748b',fontSize:'.875rem'}}>Analyzing transcript…</div>
+            <Spin sz={28}/><div style={{color:'var(--txt-3)',fontSize:'.875rem'}}>Analyzing transcript…</div>
           </div>
         ):(
           <>
@@ -1489,14 +1891,14 @@ function AINotes(){
                 {n.executiveSummary&&(
                   <div>
                     <div style={{fontSize:'.78rem',fontWeight:'700',color:'#6366f1',marginBottom:'8px',textTransform:'uppercase',letterSpacing:'.06em'}}>Executive Summary</div>
-                    <p style={{margin:0,fontSize:'.875rem',color:'#cbd5e1',lineHeight:'1.7',background:'#1e293b',borderRadius:'10px',padding:'14px',border:'1px solid #334155'}}>{n.executiveSummary}</p>
+                    <p style={{margin:0,fontSize:'.875rem',color:'var(--txt-2)',lineHeight:'1.7',background:'var(--bg-2)',borderRadius:'10px',padding:'14px',border:'1px solid var(--border-2)'}}>{n.executiveSummary}</p>
                   </div>
                 )}
                 {n.discussionPoints?.length>0&&(
                   <div>
                     <div style={{fontSize:'.78rem',fontWeight:'700',color:'#6366f1',marginBottom:'8px',textTransform:'uppercase',letterSpacing:'.06em'}}>Discussion Points</div>
                     <ul style={{margin:0,paddingLeft:'18px',display:'flex',flexDirection:'column',gap:'6px'}}>
-                      {n.discussionPoints.map((p,i)=><li key={i} style={{fontSize:'.875rem',color:'#cbd5e1',lineHeight:'1.5'}}>{p}</li>)}
+                      {n.discussionPoints.map((p,i)=><li key={i} style={{fontSize:'.875rem',color:'var(--txt-2)',lineHeight:'1.5'}}>{p}</li>)}
                     </ul>
                   </div>
                 )}
@@ -1514,8 +1916,8 @@ function AINotes(){
                     <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
                       {n.importantQuotes.map((q,i)=>(
                         <div key={i} style={{borderLeft:'3px solid #6366f1',paddingLeft:'12px'}}>
-                          <p style={{margin:'0 0 4px',fontSize:'.875rem',color:'#e2e8f0',fontStyle:'italic'}}>"{q.quote}"</p>
-                          <span style={{fontSize:'.75rem',color:'#64748b'}}>{q.speaker||'Unknown'} — {q.context}</span>
+                          <p style={{margin:'0 0 4px',fontSize:'.875rem',color:'var(--txt)',fontStyle:'italic'}}>"{q.quote}"</p>
+                          <span style={{fontSize:'.75rem',color:'var(--txt-3)'}}>{q.speaker||'Unknown'} — {q.context}</span>
                         </div>
                       ))}
                     </div>
@@ -1528,25 +1930,25 @@ function AINotes(){
               <div>
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'10px'}}>
                   <div style={{fontSize:'.78rem',fontWeight:'700',color:'#6366f1',textTransform:'uppercase',letterSpacing:'.06em'}}>Action Items</div>
-                  <span className="badge" style={{background:'rgba(99,102,241,.15)',color:'#a5b4fc',border:'1px solid rgba(99,102,241,.25)'}}>{n.actionItems?.length||0} items</span>
+                  <span className="badge" style={{background:'rgba(99,102,241,.15)',color:'var(--brand-t)',border:'1px solid rgba(99,102,241,.25)'}}>{n.actionItems?.length||0} items</span>
                 </div>
                 {n.actionItems?.length>0?(
                   <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
                     {n.actionItems.map((a,i)=>(
-                      <div key={i} style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'10px',padding:'12px'}}>
+                      <div key={i} style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'10px',padding:'12px'}}>
                         <div style={{display:'flex',alignItems:'flex-start',gap:'8px',marginBottom:'8px'}}>
                           <div style={{width:18,height:18,borderRadius:'5px',border:'2px solid #4f46e5',marginTop:'2px',flexShrink:0}}/>
-                          <p style={{margin:0,fontSize:'.875rem',color:'#e2e8f0',flex:1,lineHeight:'1.5'}}>{a.action}</p>
+                          <p style={{margin:0,fontSize:'.875rem',color:'var(--txt)',flex:1,lineHeight:'1.5'}}>{a.action}</p>
                         </div>
                         <div style={{display:'flex',flexWrap:'wrap',gap:'6px',paddingLeft:'26px'}}>
-                          <span style={{fontSize:'.75rem',color:'#94a3b8',background:'#0f172a',padding:'2px 8px',borderRadius:'5px'}}><Ic n="user" sz={11}/> {a.owner||'TBD'}</span>
-                          <span style={{fontSize:'.75rem',color:'#94a3b8',background:'#0f172a',padding:'2px 8px',borderRadius:'5px'}}><Ic n="clock" sz={11}/> {a.dueDate||'TBD'}</span>
+                          <span style={{fontSize:'.75rem',color:'var(--txt-3)',background:'var(--bg-1)',padding:'2px 8px',borderRadius:'5px'}}><Ic n="user" sz={11}/> {a.owner||'TBD'}</span>
+                          <span style={{fontSize:'.75rem',color:'var(--txt-3)',background:'var(--bg-1)',padding:'2px 8px',borderRadius:'5px'}}><Ic n="clock" sz={11}/> {a.dueDate||'TBD'}</span>
                           <PriorityBadge p={a.priority||'medium'}/>
                         </div>
                       </div>
                     ))}
                   </div>
-                ):<div style={{color:'#475569',fontSize:'.875rem'}}>No action items identified.</div>}
+                ):<div style={{color:'var(--txt-2)',fontSize:'.875rem'}}>No action items identified.</div>}
                 {n.missedAccountability?.length>0&&(
                   <div style={{marginTop:'16px'}}>
                     <div style={{fontSize:'.78rem',fontWeight:'700',color:'#f59e0b',marginBottom:'8px',textTransform:'uppercase',letterSpacing:'.06em'}}>⚠️ Missed Accountability</div>
@@ -1564,19 +1966,19 @@ function AINotes(){
                 {n.decisions?.length>0?(
                   <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
                     {n.decisions.map((dec,i)=>(
-                      <div key={i} style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'10px',padding:'12px',display:'flex',gap:'10px',alignItems:'flex-start'}}>
+                      <div key={i} style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'10px',padding:'12px',display:'flex',gap:'10px',alignItems:'flex-start'}}>
                         <div style={{width:20,height:20,borderRadius:'50%',background:dec.impact==='high'?'#ef444422':dec.impact==='medium'?'#f59e0b22':'#10b98122',border:`2px solid ${dec.impact==='high'?'#ef4444':dec.impact==='medium'?'#f59e0b':'#10b981'}`,flexShrink:0,marginTop:'2px'}}/>
                         <div>
-                          <p style={{margin:'0 0 6px',fontSize:'.875rem',color:'#e2e8f0',lineHeight:'1.5'}}>{dec.decision}</p>
+                          <p style={{margin:'0 0 6px',fontSize:'.875rem',color:'var(--txt)',lineHeight:'1.5'}}>{dec.decision}</p>
                           <div style={{display:'flex',gap:'6px',flexWrap:'wrap'}}>
-                            <span style={{fontSize:'.73rem',color:'#64748b'}}>{dec.madeBy||'Unknown'}</span>
+                            <span style={{fontSize:'.73rem',color:'var(--txt-3)'}}>{dec.madeBy||'Unknown'}</span>
                             <PriorityBadge p={dec.impact||'medium'}/>
                           </div>
                         </div>
                       </div>
                     ))}
                   </div>
-                ):<div style={{color:'#475569',fontSize:'.875rem'}}>No decisions recorded.</div>}
+                ):<div style={{color:'var(--txt-2)',fontSize:'.875rem'}}>No decisions recorded.</div>}
               </div>
             )}
 
@@ -1586,17 +1988,17 @@ function AINotes(){
                 {n.risks?.length>0?(
                   <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
                     {n.risks.map((r,i)=>(
-                      <div key={i} style={{background:'#1e293b',border:`1px solid ${r.severity==='high'?'rgba(239,68,68,.3)':r.severity==='medium'?'rgba(245,158,11,.3)':'#334155'}`,borderRadius:'10px',padding:'12px'}}>
+                      <div key={i} style={{background:'var(--bg-2)',border:`1px solid ${r.severity==='high'?'rgba(239,68,68,.3)':r.severity==='medium'?'rgba(245,158,11,.3)':'var(--border-2)'}`,borderRadius:'10px',padding:'12px'}}>
                         <div style={{display:'flex',alignItems:'flex-start',gap:'8px',marginBottom:'6px'}}>
                           <span style={{fontSize:'16px',flexShrink:0}}>{r.severity==='high'?'🔴':r.severity==='medium'?'🟡':'🟢'}</span>
-                          <p style={{margin:0,fontSize:'.875rem',color:'#e2e8f0',lineHeight:'1.5'}}>{r.risk}</p>
+                          <p style={{margin:0,fontSize:'.875rem',color:'var(--txt)',lineHeight:'1.5'}}>{r.risk}</p>
                         </div>
-                        {r.mitigation&&r.mitigation!=='none identified'&&<div style={{paddingLeft:'26px',fontSize:'.8rem',color:'#94a3b8'}}>Mitigation: {r.mitigation}</div>}
+                        {r.mitigation&&r.mitigation!=='none identified'&&<div style={{paddingLeft:'26px',fontSize:'.8rem',color:'var(--txt-3)'}}>Mitigation: {r.mitigation}</div>}
                         <div style={{paddingLeft:'26px',marginTop:'4px'}}><PriorityBadge p={r.severity||'medium'}/></div>
                       </div>
                     ))}
                   </div>
-                ):<div style={{color:'#475569',fontSize:'.875rem'}}>No risks identified.</div>}
+                ):<div style={{color:'var(--txt-2)',fontSize:'.875rem'}}>No risks identified.</div>}
               </div>
             )}
 
@@ -1605,33 +2007,33 @@ function AINotes(){
                 <div style={{fontSize:'.78rem',fontWeight:'700',color:'#6366f1',marginBottom:'10px',textTransform:'uppercase',letterSpacing:'.06em'}}>Follow-up Email Draft</div>
                 {n.followUpEmail?(
                   <div>
-                    <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'10px',overflow:'hidden'}}>
-                      <div style={{padding:'12px 14px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                    <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'10px',overflow:'hidden'}}>
+                      <div style={{padding:'12px 14px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                         <div>
-                          <span style={{fontSize:'.75rem',color:'#64748b'}}>Subject: </span>
-                          <span style={{fontSize:'.875rem',fontWeight:'600',color:'#e2e8f0'}}>{n.followUpEmail.subject}</span>
+                          <span style={{fontSize:'.75rem',color:'var(--txt-3)'}}>Subject: </span>
+                          <span style={{fontSize:'.875rem',fontWeight:'600',color:'var(--txt)'}}>{n.followUpEmail.subject}</span>
                         </div>
                         <button className="btn btn-ghost btn-sm" onClick={()=>navigator.clipboard.writeText(`Subject: ${n.followUpEmail.subject}\n\n${n.followUpEmail.body}`).then(()=>Toast.success('Email copied.'))}><Ic n="copy" sz={12}/> Copy</button>
                       </div>
-                      <div style={{padding:'14px',fontSize:'.875rem',color:'#cbd5e1',lineHeight:'1.8',whiteSpace:'pre-wrap'}}>{n.followUpEmail.body}</div>
+                      <div style={{padding:'14px',fontSize:'.875rem',color:'var(--txt-2)',lineHeight:'1.8',whiteSpace:'pre-wrap'}}>{n.followUpEmail.body}</div>
                     </div>
                   </div>
-                ):<div style={{color:'#475569',fontSize:'.875rem'}}>No email draft generated yet.</div>}
+                ):<div style={{color:'var(--txt-2)',fontSize:'.875rem'}}>No email draft generated yet.</div>}
               </div>
             )}
 
             {tab==='quality'&&n.meetingQuality&&(
               <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
-                <div style={{display:'flex',alignItems:'center',gap:'16px',background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'16px'}}>
+                <div style={{display:'flex',alignItems:'center',gap:'16px',background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'16px'}}>
                   <div style={{textAlign:'center'}}>
-                    <div style={{fontSize:'2.5rem',fontWeight:'800',color:'#6366f1'}}>{n.meetingQuality.score}<span style={{fontSize:'1rem',color:'#475569'}}>/10</span></div>
-                    <div style={{fontSize:'.75rem',color:'#64748b'}}>Quality Score</div>
+                    <div style={{fontSize:'2.5rem',fontWeight:'800',color:'#6366f1'}}>{n.meetingQuality.score}<span style={{fontSize:'1rem',color:'var(--txt-2)'}}>/10</span></div>
+                    <div style={{fontSize:'.75rem',color:'var(--txt-3)'}}>Quality Score</div>
                   </div>
                   <div style={{flex:1}}>
-                    <div style={{height:8,background:'#0f172a',borderRadius:4,overflow:'hidden',marginBottom:'8px'}}>
+                    <div style={{height:8,background:'var(--bg-1)',borderRadius:4,overflow:'hidden',marginBottom:'8px'}}>
                       <div style={{height:'100%',width:`${(n.meetingQuality.score||0)*10}%`,background:'linear-gradient(90deg,#6366f1,#8b5cf6)',borderRadius:4,transition:'width .5s'}}/>
                     </div>
-                    <div style={{fontSize:'.78rem',color:'#94a3b8'}}>Engagement: <strong style={{color:'#e2e8f0',textTransform:'capitalize'}}>{n.meetingQuality.engagement}</strong></div>
+                    <div style={{fontSize:'.78rem',color:'var(--txt-3)'}}>Engagement: <strong style={{color:'var(--txt)',textTransform:'capitalize'}}>{n.meetingQuality.engagement}</strong></div>
                   </div>
                 </div>
                 {n.meetingQuality.positives?.length>0&&(
@@ -1671,9 +2073,9 @@ function CameraPreview(){
   },[s.cameraActive]);
   if(!s.cameraActive)return null;
   return(
-    <div style={{position:'relative',background:'#0f172a',borderRadius:'10px',overflow:'hidden',border:'1px solid #334155',aspectRatio:'16/9',maxWidth:'220px'}}>
+    <div style={{position:'relative',background:'var(--bg-1)',borderRadius:'10px',overflow:'hidden',border:'1px solid var(--border-2)',aspectRatio:'16/9',maxWidth:'220px'}}>
       <video ref={vidRef} autoPlay muted playsInline style={{width:'100%',height:'100%',objectFit:'cover'}}/>
-      <div style={{position:'absolute',bottom:6,left:6,background:'rgba(0,0,0,.6)',borderRadius:5,padding:'2px 6px',fontSize:'.65rem',color:'#e2e8f0',backdropFilter:'blur(4px)'}}>CAMERA</div>
+      <div style={{position:'absolute',bottom:6,left:6,background:'rgba(0,0,0,.6)',borderRadius:5,padding:'2px 6px',fontSize:'.65rem',color:'var(--txt)',backdropFilter:'blur(4px)'}}>CAMERA</div>
     </div>
   );
 }
@@ -1695,12 +2097,12 @@ function FileProtocolBanner(){
           <div style={{display:'flex',gap:'10px',marginTop:'8px',flexWrap:'wrap'}}>
             {[['Node (npx)','npx serve .'],['Python','python -m http.server 8080'],['VS Code','Right-click → Open with Live Server']].map(([l,cmd])=>(
               <div key={l} style={{background:'rgba(0,0,0,.4)',border:'1px solid rgba(239,68,68,.25)',borderRadius:'7px',padding:'6px 12px'}}>
-                <div style={{fontSize:'.68rem',color:'#94a3b8',marginBottom:'2px'}}>{l}</div>
+                <div style={{fontSize:'.68rem',color:'var(--txt-3)',marginBottom:'2px'}}>{l}</div>
                 <code style={{fontSize:'.8rem',color:'#fbbf24'}}>{cmd}</code>
               </div>
             ))}
           </div>
-          <div style={{marginTop:'6px',color:'#94a3b8',fontSize:'.78rem'}}>Then open <strong style={{color:'#e2e8f0'}}>http://localhost:8080</strong> (or port 3000 for npx serve) in your browser.</div>
+          <div style={{marginTop:'6px',color:'var(--txt-3)',fontSize:'.78rem'}}>Then open <strong style={{color:'var(--txt)'}}>http://localhost:8080</strong> (or port 3000 for npx serve) in your browser.</div>
         </div>
       </div>
     </div>
@@ -1709,11 +2111,19 @@ function FileProtocolBanner(){
 
 // ─── RECORDING STUDIO (MAIN VIEW) ─────────────────────────────────────────────
 function RecordingStudio(){
-  const{s,ax}=useApp();
+  const{s,ax,d}=useApp();
   const[showModal,setShowModal]=useState(false);
   const[micLoading,setMicLoading]=useState(false);
   const[screenLoading,setScreenLoading]=useState(false);
   const[camLoading,setCamLoading]=useState(false);
+  const[hasFolder,setHasFolder]=useState(null); // null=checking, true/false
+  const[folderDismissed,setFolderDismissed]=useState(false);
+
+  useEffect(()=>{
+    FileSystemService.getFolderName()
+      .then(n=>setHasFolder(!!n))
+      .catch(()=>setHasFolder(false));
+  },[]);
 
   const handleStartMic=async()=>{setMicLoading(true);await ax.startMic();setMicLoading(false);};
   const handleStartScreen=async()=>{setScreenLoading(true);await ax.startScreen();setScreenLoading(false);};
@@ -1724,6 +2134,27 @@ function RecordingStudio(){
   return(
     <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
       {showModal&&<NewMeetingModal onStart={doStart} onClose={()=>setShowModal(false)}/>}
+
+      {/* Workspace folder nudge */}
+      {hasFolder===false&&!folderDismissed&&FileSystemService.isSupported()&&(
+        <div style={{background:'rgba(59,130,246,.06)',borderBottom:'1px solid rgba(59,130,246,.2)',padding:'9px 20px',display:'flex',alignItems:'center',gap:'10px',flexShrink:0,fontSize:'.8rem'}}>
+          <Ic n="folder" sz={15} cls="" style={{color:'#60a5fa',flexShrink:0}}/>
+          <span style={{color:'var(--txt-2)',flex:1}}>
+            <strong style={{color:'#60a5fa'}}>Tip:</strong> Pick a workspace folder to auto-save every meeting to your computer — unlimited history, no browser storage limits.
+          </span>
+          <button className="btn btn-ghost btn-sm" style={{borderColor:'rgba(59,130,246,.3)',color:'#60a5fa'}}
+            onClick={async()=>{
+              try{
+                const h=await FileSystemService.pickFolder();
+                setHasFolder(true);
+                Toast.success(`Workspace set: ${h.name}`);
+              }catch(e){if(!e.message.includes('aborted')&&!e.message.includes('dismissed'))Toast.error(e.message);}
+            }}>
+            <Ic n="folder" sz={12}/> Pick Folder
+          </button>
+          <button onClick={()=>setFolderDismissed(true)} style={{background:'none',border:'none',cursor:'pointer',color:'var(--txt-3)',padding:'2px',display:'flex'}}><Ic n="x" sz={14}/></button>
+        </div>
+      )}
 
       {/* Consent banner */}
       {s.settings.consentAcknowledged!=='true'&&(
@@ -1749,9 +2180,9 @@ function RecordingStudio(){
             <div style={{display:'flex',alignItems:'center',gap:'10px',padding:'9px 14px',background:'rgba(16,185,129,.06)',border:'1px solid rgba(16,185,129,.2)',borderRadius:'10px',fontSize:'.8rem',flexWrap:'wrap'}}>
               <span style={{color:'#34d399',fontWeight:'700'}}>🎙 Active sources:</span>
               {s.micActive&&<span style={{background:'rgba(16,185,129,.12)',border:'1px solid rgba(16,185,129,.3)',color:'#6ee7b7',padding:'2px 10px',borderRadius:'999px'}}>Microphone</span>}
-              {s.micActive&&s.screenAudioActive&&<span style={{color:'#475569'}}>+</span>}
+              {s.micActive&&s.screenAudioActive&&<span style={{color:'var(--txt-2)'}}>+</span>}
               {s.screenAudioActive&&<span style={{background:'rgba(16,185,129,.12)',border:'1px solid rgba(16,185,129,.3)',color:'#6ee7b7',padding:'2px 10px',borderRadius:'999px'}}>Meeting Audio</span>}
-              <span style={{color:'#475569',marginLeft:'4px'}}>— both will be mixed and transcribed together</span>
+              <span style={{color:'var(--txt-2)',marginLeft:'4px'}}>— both will be mixed and transcribed together</span>
               {!s.micActive&&s.screenAudioActive&&(
                 <button className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}} onClick={handleStartMic} disabled={micLoading}>
                   {micLoading?<Spin sz={12}/>:<Ic n="mic" sz={12}/>} Add mic too
@@ -1769,12 +2200,12 @@ function RecordingStudio(){
         {/* Controls + participants row */}
         <div style={{display:'flex',gap:'12px',flexWrap:'wrap',alignItems:'flex-start'}}>
           <div style={{flex:2,minWidth:300}}>
-            <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'16px',display:'flex',alignItems:'center',gap:'14px',flexWrap:'wrap'}}>
+            <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'16px',display:'flex',alignItems:'center',gap:'14px',flexWrap:'wrap'}}>
               {s.currentMeeting&&(
                 <div style={{marginRight:'auto'}}>
                   <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
                     <span style={{fontSize:'18px'}}>{TEMPLATES[s.currentMeeting.template]?.icon||'📋'}</span>
-                    <span style={{fontSize:'.875rem',fontWeight:'600',color:'#e2e8f0',maxWidth:220,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.currentMeeting.title}</span>
+                    <span style={{fontSize:'.875rem',fontWeight:'600',color:'var(--txt)',maxWidth:220,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.currentMeeting.title}</span>
                   </div>
                 </div>
               )}
@@ -1786,31 +2217,34 @@ function RecordingStudio(){
 
         {/* Teams / platform capture guide */}
         {s.recordingStatus==='idle'&&!s.micActive&&!s.screenAudioActive&&(
-          <div style={{background:'rgba(99,102,241,.06)',border:'1px solid rgba(99,102,241,.2)',borderRadius:'10px',padding:'12px 16px',fontSize:'.82rem',color:'#94a3b8',lineHeight:'1.7'}}>
-            <span style={{color:'#a5b4fc',fontWeight:'700'}}>📋 How to capture your meeting audio:</span>
+          <div style={{background:'rgba(99,102,241,.06)',border:'1px solid rgba(99,102,241,.2)',borderRadius:'10px',padding:'12px 16px',fontSize:'.82rem',color:'var(--txt-3)',lineHeight:'1.7'}}>
+            <span style={{color:'var(--brand-t)',fontWeight:'700'}}>📋 How to capture your meeting audio:</span>
             <div style={{marginTop:'6px',display:'flex',flexDirection:'column',gap:'4px'}}>
-              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Teams / Meet / Zoom in browser:</span> Click <strong style={{color:'#e2e8f0'}}>Meeting Audio</strong> → select the meeting tab → tick <em>"Share tab audio"</em></div>
-              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Teams desktop app (Windows):</span> Click <strong style={{color:'#e2e8f0'}}>Meeting Audio</strong> → select <em>"Entire Screen"</em> → tick <em>"Also share system audio"</em></div>
-              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Physical room / in-person:</span> Click <strong style={{color:'#e2e8f0'}}>Microphone</strong> to capture your mic directly</div>
+              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Teams / Meet / Zoom in browser:</span> Click <strong style={{color:'var(--txt)'}}>Meeting Audio</strong> → select the meeting tab → tick <em>"Share tab audio"</em></div>
+              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Teams desktop app (Windows):</span> Click <strong style={{color:'var(--txt)'}}>Meeting Audio</strong> → select <em>"Entire Screen"</em> → tick <em>"Also share system audio"</em></div>
+              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Physical room / in-person:</span> Click <strong style={{color:'var(--txt)'}}>Microphone</strong> to capture your mic directly</div>
             </div>
           </div>
         )}
 
         {/* Speaker mode notice */}
         {(s.recordingStatus==='recording'||s.recordingStatus==='paused')&&(
-          <div style={{background:'#1e293b',border:'1px solid #4f46e5',borderRadius:'10px',padding:'10px 14px',fontSize:'.8rem',color:'#94a3b8',display:'flex',alignItems:'center',gap:'8px'}}>
+          <div style={{background:'var(--bg-2)',border:'1px solid #4f46e5',borderRadius:'10px',padding:'10px 14px',fontSize:'.8rem',color:'var(--txt-3)',display:'flex',alignItems:'center',gap:'8px'}}>
             <span style={{color:'#6366f1',fontWeight:'700'}}>Speaker Mode:</span>
             Click "+ speaker" on any transcript segment to assign a speaker. Add participant names above for quick assignment. AI suggestions are context-based and may be inaccurate.
           </div>
         )}
 
+        {/* Attention Card */}
+        {(s.recordingStatus==='recording'||s.recordingStatus==='paused')&&<AttentionCard/>}
+
         {/* Transcript + Notes split */}
         {(s.recordingStatus==='recording'||s.recordingStatus==='paused'||s.recordingStatus==='done'||s.recordingStatus==='stopping')&&(
           <div style={{flex:1,display:'grid',gridTemplateColumns:'1fr 1fr',gap:'16px',minHeight:400}}>
-            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:'14px',padding:'16px',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+            <div style={{background:'var(--bg-1)',border:'1px solid var(--border)',borderRadius:'14px',padding:'16px',display:'flex',flexDirection:'column',overflow:'hidden'}}>
               <LiveTranscript/>
             </div>
-            <div style={{background:'#0f172a',border:'1px solid #1e293b',borderRadius:'14px',padding:'16px',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+            <div style={{background:'var(--bg-1)',border:'1px solid var(--border)',borderRadius:'14px',padding:'16px',display:'flex',flexDirection:'column',overflow:'hidden'}}>
               <AINotes/>
             </div>
           </div>
@@ -1861,8 +2295,8 @@ function Archive(){
       <div style={{maxWidth:'860px',margin:'0 auto'}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'20px',gap:'12px',flexWrap:'wrap'}}>
           <div>
-            <h1 style={{fontSize:'1.25rem',fontWeight:'700',color:'#e2e8f0',margin:0}}>Meeting Archive</h1>
-            <p style={{color:'#475569',fontSize:'.82rem',marginTop:'4px',marginBottom:0}}>{s.meetings.length} meetings stored locally</p>
+            <h1 style={{fontSize:'1.25rem',fontWeight:'700',color:'var(--txt)',margin:0}}>Meeting Archive</h1>
+            <p style={{color:'var(--txt-2)',fontSize:'.82rem',marginTop:'4px',marginBottom:0}}>{s.meetings.length} meetings stored locally</p>
           </div>
           <div style={{display:'flex',gap:'10px',alignItems:'center'}}>
             <input className="inp" style={{width:220,padding:'8px 12px',fontSize:'.83rem'}} placeholder="Search meetings…" value={search} onChange={e=>setSearch(e.target.value)}/>
@@ -1871,10 +2305,10 @@ function Archive(){
         </div>
 
         {filtered.length===0?(
-          <div style={{textAlign:'center',padding:'60px 20px',color:'#334155'}}>
+          <div style={{textAlign:'center',padding:'60px 20px',color:'var(--txt-3)'}}>
             <div style={{fontSize:'42px',marginBottom:'14px'}}>📂</div>
-            <div style={{fontSize:'.95rem',color:'#475569',fontWeight:'600'}}>No meetings found</div>
-            <div style={{fontSize:'.82rem',color:'#334155',marginTop:'6px'}}>Start a new recording to see it here</div>
+            <div style={{fontSize:'.95rem',color:'var(--txt-2)',fontWeight:'600'}}>No meetings found</div>
+            <div style={{fontSize:'.82rem',color:'var(--txt-3)',marginTop:'6px'}}>Start a new recording to see it here</div>
           </div>
         ):(
           <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
@@ -1884,15 +2318,20 @@ function Archive(){
                   {TEMPLATES[m.template]?.icon||'📋'}
                 </div>
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontWeight:'600',fontSize:'.9rem',color:'#e2e8f0',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{m.title}</div>
-                  <div style={{fontSize:'.75rem',color:'#475569',marginTop:'3px',display:'flex',gap:'10px',flexWrap:'wrap'}}>
+                  <div style={{fontWeight:'600',fontSize:'.9rem',color:'var(--txt)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{m.title}</div>
+                  <div style={{fontSize:'.75rem',color:'var(--txt-2)',marginTop:'3px',display:'flex',gap:'10px',flexWrap:'wrap'}}>
                     <span><Ic n="clock" sz={11}/> {fmtDate(m.date)}</span>
                     {m.duration>0&&<span>⏱ {ExportService.fmt(m.duration)}</span>}
                     <span>{TEMPLATES[m.template]?.label||'General'}</span>
                     {m.participants?.length>0&&<span><Ic n="user" sz={11}/> {m.participants.join(', ')}</span>}
                   </div>
                 </div>
-                <div style={{display:'flex',gap:'6px',flexShrink:0}} onClick={e=>e.stopPropagation()}>
+                <div style={{display:'flex',gap:'6px',flexShrink:0,alignItems:'center'}} onClick={e=>e.stopPropagation()}>
+                  {m._fromDisk&&(
+                    <span title="Saved to your workspace folder" style={{padding:'3px 9px',borderRadius:'6px',fontSize:'.7rem',fontWeight:'700',background:'rgba(59,130,246,.12)',color:'#60a5fa',border:'1px solid rgba(59,130,246,.25)',display:'flex',alignItems:'center',gap:'4px'}}>
+                      <Ic n="hdd" sz={11}/> Disk
+                    </span>
+                  )}
                   <span style={{padding:'3px 9px',borderRadius:'6px',fontSize:'.7rem',fontWeight:'700',background:m.status==='done'?'rgba(16,185,129,.15)':'rgba(99,102,241,.15)',color:m.status==='done'?'#34d399':'#818cf8',border:`1px solid ${m.status==='done'?'rgba(16,185,129,.3)':'rgba(99,102,241,.3)'}`}}>
                     {m.status==='done'?'✓ Done':'Active'}
                   </span>
@@ -1908,9 +2347,9 @@ function Archive(){
 
       {confirmDel&&(
         <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200}}>
-          <div style={{background:'#0f172a',border:'1px solid #334155',borderRadius:'16px',padding:'24px',maxWidth:'380px',width:'90%',boxShadow:'0 20px 50px rgba(0,0,0,.5)'}}>
-            <h3 style={{margin:'0 0 10px',color:'#e2e8f0'}}>Delete Meeting?</h3>
-            <p style={{color:'#64748b',fontSize:'.875rem',marginBottom:'20px'}}>This will permanently delete the meeting, transcript, audio, and AI notes. This cannot be undone.</p>
+          <div style={{background:'var(--bg-1)',border:'1px solid var(--border-2)',borderRadius:'16px',padding:'24px',maxWidth:'380px',width:'90%',boxShadow:'0 20px 50px rgba(0,0,0,.5)'}}>
+            <h3 style={{margin:'0 0 10px',color:'var(--txt)'}}>Delete Meeting?</h3>
+            <p style={{color:'var(--txt-3)',fontSize:'.875rem',marginBottom:'20px'}}>This will permanently delete the meeting, transcript, audio, and AI notes. This cannot be undone.</p>
             <div style={{display:'flex',gap:'10px'}}>
               <button className="btn btn-ghost" style={{flex:1}} onClick={()=>setConfirmDel(null)}>Cancel</button>
               <button className="btn btn-danger" style={{flex:1}} onClick={()=>doDelete(confirmDel)}><Ic n="trash" sz={14}/> Delete</button>
@@ -1944,10 +2383,10 @@ function MeetingDetail(){
           <div style={{flex:1}}>
             <div style={{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}}>
               <span style={{fontSize:'24px'}}>{TEMPLATES[m.template]?.icon||'📋'}</span>
-              <h1 style={{margin:0,fontSize:'1.25rem',fontWeight:'700',color:'#e2e8f0'}}>{m.title}</h1>
+              <h1 style={{margin:0,fontSize:'1.25rem',fontWeight:'700',color:'var(--txt)'}}>{m.title}</h1>
               <span style={{padding:'3px 9px',borderRadius:'6px',fontSize:'.72rem',fontWeight:'700',background:'rgba(16,185,129,.15)',color:'#34d399',border:'1px solid rgba(16,185,129,.3)'}}>{m.status==='done'?'✓ Done':'Active'}</span>
             </div>
-            <div style={{display:'flex',gap:'14px',marginTop:'6px',flexWrap:'wrap',fontSize:'.78rem',color:'#64748b'}}>
+            <div style={{display:'flex',gap:'14px',marginTop:'6px',flexWrap:'wrap',fontSize:'.78rem',color:'var(--txt-3)'}}>
               <span><Ic n="clock" sz={12}/> {new Date(m.date).toLocaleString()}</span>
               {m.duration>0&&<span>⏱ {ExportService.fmt(m.duration)}</span>}
               {m.participants?.length>0&&<span><Ic n="user" sz={12}/> {m.participants.join(', ')}</span>}
@@ -1972,7 +2411,7 @@ function MeetingDetail(){
         </div>
 
         {/* Tabs */}
-        <div style={{display:'flex',gap:'4px',marginBottom:'20px',background:'#0f172a',padding:'4px',borderRadius:'10px',border:'1px solid #1e293b',width:'fit-content'}}>
+        <div style={{display:'flex',gap:'4px',marginBottom:'20px',background:'var(--bg-1)',padding:'4px',borderRadius:'10px',border:'1px solid var(--border)',width:'fit-content'}}>
           {[['summary','AI Notes'],['transcript','Transcript'],['actions','Actions'],['email','Email']].map(([k,l])=>(
             <button key={k} className={`tab${tab===k?' active':''}`} onClick={()=>setTab(k)}>{l}</button>
           ))}
@@ -1980,14 +2419,14 @@ function MeetingDetail(){
 
         {tab==='transcript'&&(
           <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
-            {t.length===0?<div style={{color:'#475569'}}>No transcript available.</div>:
+            {t.length===0?<div style={{color:'var(--txt-2)'}}>No transcript available.</div>:
               t.map((chunk,i)=>(
-                <div key={i} style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'10px',padding:'12px'}}>
+                <div key={i} style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'10px',padding:'12px'}}>
                   <div style={{display:'flex',gap:'8px',marginBottom:'6px',alignItems:'center'}}>
-                    <span style={{fontSize:'.7rem',fontFamily:'monospace',color:'#475569',background:'#0f172a',padding:'2px 7px',borderRadius:'5px'}}>{ExportService.fmtT(chunk.startTime)}</span>
-                    {chunk.speaker&&<span style={{padding:'2px 9px',borderRadius:'999px',background:'rgba(99,102,241,.15)',border:'1px solid rgba(99,102,241,.3)',fontSize:'.73rem',fontWeight:'700',color:'#a5b4fc'}}>{chunk.speaker}</span>}
+                    <span style={{fontSize:'.7rem',fontFamily:'monospace',color:'var(--txt-2)',background:'var(--bg-1)',padding:'2px 7px',borderRadius:'5px'}}>{ExportService.fmtT(chunk.startTime)}</span>
+                    {chunk.speaker&&<span style={{padding:'2px 9px',borderRadius:'999px',background:'rgba(99,102,241,.15)',border:'1px solid rgba(99,102,241,.3)',fontSize:'.73rem',fontWeight:'700',color:'var(--brand-t)'}}>{chunk.speaker}</span>}
                   </div>
-                  <p style={{margin:0,fontSize:'.875rem',color:'#e2e8f0',lineHeight:'1.6'}}>{chunk.text}</p>
+                  <p style={{margin:0,fontSize:'.875rem',color:'var(--txt)',lineHeight:'1.6'}}>{chunk.text}</p>
                 </div>
               ))
             }
@@ -1996,43 +2435,43 @@ function MeetingDetail(){
 
         {tab==='summary'&&n&&(
           <div style={{display:'flex',flexDirection:'column',gap:'18px'}}>
-            {n.executiveSummary&&<div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',padding:'16px'}}><div style={{fontSize:'.75rem',fontWeight:'700',color:'#6366f1',marginBottom:'8px',textTransform:'uppercase'}}>Executive Summary</div><p style={{margin:0,fontSize:'.875rem',color:'#cbd5e1',lineHeight:'1.7'}}>{n.executiveSummary}</p></div>}
-            {n.discussionPoints?.length>0&&<div><div style={{fontSize:'.75rem',fontWeight:'700',color:'#6366f1',marginBottom:'8px',textTransform:'uppercase'}}>Discussion Points</div><ul style={{margin:0,paddingLeft:'18px',display:'flex',flexDirection:'column',gap:'6px'}}>{n.discussionPoints.map((p,i)=><li key={i} style={{fontSize:'.875rem',color:'#cbd5e1',lineHeight:'1.5'}}>{p}</li>)}</ul></div>}
+            {n.executiveSummary&&<div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'16px'}}><div style={{fontSize:'.75rem',fontWeight:'700',color:'#6366f1',marginBottom:'8px',textTransform:'uppercase'}}>Executive Summary</div><p style={{margin:0,fontSize:'.875rem',color:'var(--txt-2)',lineHeight:'1.7'}}>{n.executiveSummary}</p></div>}
+            {n.discussionPoints?.length>0&&<div><div style={{fontSize:'.75rem',fontWeight:'700',color:'#6366f1',marginBottom:'8px',textTransform:'uppercase'}}>Discussion Points</div><ul style={{margin:0,paddingLeft:'18px',display:'flex',flexDirection:'column',gap:'6px'}}>{n.discussionPoints.map((p,i)=><li key={i} style={{fontSize:'.875rem',color:'var(--txt-2)',lineHeight:'1.5'}}>{p}</li>)}</ul></div>}
             {n.openQuestions?.length>0&&<div><div style={{fontSize:'.75rem',fontWeight:'700',color:'#f59e0b',marginBottom:'8px',textTransform:'uppercase'}}>Open Questions</div><ul style={{margin:0,paddingLeft:'18px',display:'flex',flexDirection:'column',gap:'6px'}}>{n.openQuestions.map((q,i)=><li key={i} style={{fontSize:'.875rem',color:'#fbbf24'}}>{q}</li>)}</ul></div>}
-            {n.risks?.length>0&&<div><div style={{fontSize:'.75rem',fontWeight:'700',color:'#ef4444',marginBottom:'8px',textTransform:'uppercase'}}>Risks & Blockers</div><div style={{display:'flex',flexDirection:'column',gap:'8px'}}>{n.risks.map((r,i)=><div key={i} style={{background:'#1e293b',borderRadius:'9px',padding:'10px 12px',fontSize:'.875rem',color:'#e2e8f0'}}>{r.severity==='high'?'🔴':r.severity==='medium'?'🟡':'🟢'} {r.risk}{r.mitigation&&r.mitigation!=='none identified'?<span style={{color:'#64748b'}}> — {r.mitigation}</span>:null}</div>)}</div></div>}
+            {n.risks?.length>0&&<div><div style={{fontSize:'.75rem',fontWeight:'700',color:'#ef4444',marginBottom:'8px',textTransform:'uppercase'}}>Risks & Blockers</div><div style={{display:'flex',flexDirection:'column',gap:'8px'}}>{n.risks.map((r,i)=><div key={i} style={{background:'var(--bg-2)',borderRadius:'9px',padding:'10px 12px',fontSize:'.875rem',color:'var(--txt)'}}>{r.severity==='high'?'🔴':r.severity==='medium'?'🟡':'🟢'} {r.risk}{r.mitigation&&r.mitigation!=='none identified'?<span style={{color:'var(--txt-3)'}}> — {r.mitigation}</span>:null}</div>)}</div></div>}
           </div>
         )}
-        {tab==='summary'&&!n&&<div style={{color:'#475569',fontSize:'.875rem'}}>No AI notes available for this meeting.</div>}
+        {tab==='summary'&&!n&&<div style={{color:'var(--txt-2)',fontSize:'.875rem'}}>No AI notes available for this meeting.</div>}
 
         {tab==='actions'&&n&&(
           <div>
             {n.actionItems?.length>0?(
               <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
                 {n.actionItems.map((a,i)=>(
-                  <div key={i} style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'10px',padding:'12px'}}>
+                  <div key={i} style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'10px',padding:'12px'}}>
                     <div style={{display:'flex',gap:'8px',marginBottom:'8px',alignItems:'flex-start'}}>
                       <div style={{width:18,height:18,borderRadius:'5px',border:'2px solid #4f46e5',marginTop:'2px',flexShrink:0}}/>
-                      <p style={{margin:0,fontSize:'.875rem',color:'#e2e8f0',flex:1,lineHeight:'1.5'}}>{a.action}</p>
+                      <p style={{margin:0,fontSize:'.875rem',color:'var(--txt)',flex:1,lineHeight:'1.5'}}>{a.action}</p>
                     </div>
                     <div style={{display:'flex',gap:'6px',flexWrap:'wrap',paddingLeft:'26px'}}>
-                      <span style={{fontSize:'.73rem',color:'#64748b',background:'#0f172a',padding:'2px 8px',borderRadius:'5px'}}>{a.owner||'TBD'}</span>
-                      <span style={{fontSize:'.73rem',color:'#64748b',background:'#0f172a',padding:'2px 8px',borderRadius:'5px'}}>{a.dueDate||'TBD'}</span>
+                      <span style={{fontSize:'.73rem',color:'var(--txt-3)',background:'var(--bg-1)',padding:'2px 8px',borderRadius:'5px'}}>{a.owner||'TBD'}</span>
+                      <span style={{fontSize:'.73rem',color:'var(--txt-3)',background:'var(--bg-1)',padding:'2px 8px',borderRadius:'5px'}}>{a.dueDate||'TBD'}</span>
                       <PBadge p={a.priority||'medium'}/>
                     </div>
                   </div>
                 ))}
               </div>
-            ):<div style={{color:'#475569'}}>No action items.</div>}
+            ):<div style={{color:'var(--txt-2)'}}>No action items.</div>}
           </div>
         )}
 
         {tab==='email'&&n?.followUpEmail&&(
-          <div style={{background:'#1e293b',border:'1px solid #334155',borderRadius:'12px',overflow:'hidden'}}>
-            <div style={{padding:'12px 16px',borderBottom:'1px solid #334155',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-              <div><span style={{fontSize:'.78rem',color:'#64748b'}}>Subject: </span><span style={{fontSize:'.875rem',fontWeight:'600',color:'#e2e8f0'}}>{n.followUpEmail.subject}</span></div>
+          <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',overflow:'hidden'}}>
+            <div style={{padding:'12px 16px',borderBottom:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <div><span style={{fontSize:'.78rem',color:'var(--txt-3)'}}>Subject: </span><span style={{fontSize:'.875rem',fontWeight:'600',color:'var(--txt)'}}>{n.followUpEmail.subject}</span></div>
               <button className="btn btn-ghost btn-sm" onClick={()=>navigator.clipboard.writeText(`Subject: ${n.followUpEmail.subject}\n\n${n.followUpEmail.body}`).then(()=>Toast.success('Copied.'))}><Ic n="copy" sz={12}/> Copy</button>
             </div>
-            <div style={{padding:'16px',fontSize:'.875rem',color:'#cbd5e1',lineHeight:'1.8',whiteSpace:'pre-wrap'}}>{n.followUpEmail.body}</div>
+            <div style={{padding:'16px',fontSize:'.875rem',color:'var(--txt-2)',lineHeight:'1.8',whiteSpace:'pre-wrap'}}>{n.followUpEmail.body}</div>
           </div>
         )}
       </div>
@@ -2056,22 +2495,22 @@ function TemplatesScreen(){
   return(
     <div style={{flex:1,overflow:'auto',padding:'28px'}}>
       <div style={{maxWidth:'820px',margin:'0 auto'}}>
-        <h1 style={{fontSize:'1.25rem',fontWeight:'700',color:'#e2e8f0',marginBottom:'8px'}}>Meeting Templates</h1>
-        <p style={{color:'#475569',fontSize:'.875rem',marginBottom:'24px'}}>Each template tailors the AI prompt and note structure for different meeting types.</p>
+        <h1 style={{fontSize:'1.25rem',fontWeight:'700',color:'var(--txt)',marginBottom:'8px'}}>Meeting Templates</h1>
+        <p style={{color:'var(--txt-2)',fontSize:'.875rem',marginBottom:'24px'}}>Each template tailors the AI prompt and note structure for different meeting types.</p>
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:'14px'}}>
           {Object.entries(TEMPLATES).map(([k,t])=>{
             const det=templateDetails[k]||{description:'',prompts:[]};
             const isDefault=s.settings.defaultTemplate===k;
             return(
-              <div key={k} className="card fade-slide" style={{borderColor:isDefault?t.color+'66':'#334155',background:isDefault?`${t.color}0a`:'#1e293b'}}>
+              <div key={k} className="card fade-slide" style={{borderColor:isDefault?t.color+'66':'var(--border-2)',background:isDefault?`${t.color}0a`:'var(--bg-2)'}}>
                 <div style={{display:'flex',alignItems:'flex-start',gap:'12px',marginBottom:'12px'}}>
                   <div style={{width:42,height:42,borderRadius:'11px',background:`${t.color}22`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'20px',border:`1px solid ${t.color}44`,flexShrink:0}}>{t.icon}</div>
                   <div style={{flex:1}}>
                     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                      <div style={{fontWeight:'700',fontSize:'.9rem',color:'#e2e8f0'}}>{t.label}</div>
+                      <div style={{fontWeight:'700',fontSize:'.9rem',color:'var(--txt)'}}>{t.label}</div>
                       {isDefault&&<span style={{fontSize:'.68rem',fontWeight:'700',padding:'2px 8px',borderRadius:'5px',background:`${t.color}22`,color:t.color,border:`1px solid ${t.color}44`}}>DEFAULT</span>}
                     </div>
-                    <p style={{margin:'4px 0 0',fontSize:'.8rem',color:'#64748b',lineHeight:'1.5'}}>{det.description}</p>
+                    <p style={{margin:'4px 0 0',fontSize:'.8rem',color:'var(--txt-3)',lineHeight:'1.5'}}>{det.description}</p>
                   </div>
                 </div>
                 <div style={{display:'flex',flexWrap:'wrap',gap:'5px',marginBottom:'12px'}}>
@@ -2103,7 +2542,7 @@ function Shell(){
 
   if(!s.settingsLoaded){
     return(
-      <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'#0f172a'}}>
+      <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--bg-1)'}}>
         <Spin sz={32}/>
       </div>
     );
