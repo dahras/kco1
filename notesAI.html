@@ -278,7 +278,7 @@ var AzureChat = (() => {
 // AUDIO CAPTURE
 // ═══════════════════════════════════════════════════════════════
 var AudioCapture = (() => {
-  let micStream=null,screenStream=null,cameraStream=null,audioContext=null,destination=null,mediaRecorder=null,chunks=[],chunkInterval=null;
+  let micStream=null,screenStream=null,cameraStream=null,audioContext=null,destination=null,mediaRecorder=null,chunks=[],chunkInterval=null,_isPaused=false,_onStop=null,_mime=null;
 
   function checkMediaDevices() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -367,22 +367,47 @@ var AudioCapture = (() => {
   }
   function startRecording(onChunk,onStop,intervalMs=20000){
     if(!micStream&&!screenStream)throw new Error('No audio source. Start mic or screen audio first.');
-    const mix=buildMix(),mime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';
-    mediaRecorder=new MediaRecorder(mix,{mimeType:mime,audioBitsPerSecond:64000});
-    chunks=[]; let idx=0,t0=Date.now();
-    mediaRecorder.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
-    mediaRecorder.onstop=()=>{if(chunks.length&&onStop){const b=new Blob(chunks,{type:mime});onStop(b);}};
-    mediaRecorder.start();
+    const mix=buildMix();
+    _mime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';
+    _onStop=onStop; _isPaused=false; chunks=[]; let idx=0,t0=Date.now();
+
+    // Each segment restarts the MediaRecorder so every blob is a complete,
+    // self-contained webm file with its own header — partial webm clusters
+    // (produced by requestData()) are rejected by the transcription API.
+    function startSeg(){
+      let segChunks=[], segStart=t0;
+      const rec=new MediaRecorder(mix,{mimeType:_mime,audioBitsPerSecond:64000});
+      rec.ondataavailable=e=>{if(e.data.size>0){segChunks.push(e.data);chunks.push(e.data);}};
+      rec.onstop=()=>{
+        if(segChunks.length&&onChunk){
+          const b=new Blob(segChunks,{type:_mime});
+          onChunk(b,{chunkId:idx++,startTime:segStart,endTime:Date.now()});
+        }
+        t0=Date.now();
+      };
+      rec.start();
+      mediaRecorder=rec;
+    }
+
+    startSeg();
     chunkInterval=setInterval(()=>{
-      if(mediaRecorder.state==='recording'){
-        mediaRecorder.requestData();
-        setTimeout(()=>{if(chunks.length){const b=new Blob(chunks,{type:mime}),meta={chunkId:idx++,startTime:t0,endTime:Date.now()};chunks=[];t0=Date.now();onChunk&&onChunk(b,meta);}},200);
-      }
+      if(_isPaused||!mediaRecorder||mediaRecorder.state!=='recording')return;
+      const old=mediaRecorder;
+      startSeg();      // new recorder starts immediately (no gap)
+      old.stop();      // old recorder stops → ondataavailable → onstop → onChunk
     },intervalMs);
   }
-  function pauseRecording(){if(mediaRecorder?.state==='recording')mediaRecorder.pause();}
-  function resumeRecording(){if(mediaRecorder?.state==='paused')mediaRecorder.resume();}
-  function stopRecording(){if(chunkInterval){clearInterval(chunkInterval);chunkInterval=null;}if(mediaRecorder&&mediaRecorder.state!=='inactive')mediaRecorder.stop();}
+  function pauseRecording(){_isPaused=true;if(mediaRecorder?.state==='recording')mediaRecorder.pause();}
+  function resumeRecording(){_isPaused=false;if(mediaRecorder?.state==='paused')mediaRecorder.resume();}
+  function stopRecording(){
+    if(chunkInterval){clearInterval(chunkInterval);chunkInterval=null;}
+    if(mediaRecorder&&mediaRecorder.state!=='inactive'){
+      const cb=_onStop,m=_mime,acc=chunks.slice();
+      mediaRecorder.ondataavailable=e=>{if(e.data.size>0)acc.push(e.data);};
+      mediaRecorder.onstop=()=>{if(acc.length&&cb)cb(new Blob(acc,{type:m}));};
+      mediaRecorder.stop();
+    }
+  }
   function stopAll(){
     stopRecording();
     if(audioContext){audioContext.close().catch(()=>{});audioContext=null;}
