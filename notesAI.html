@@ -737,7 +737,7 @@ const DEFAULT_SETTINGS={userName:'',organization:'',department:'',preferredLangu
   whisperDeployment:'gpt-4o-mini-transcribe',
   chatDeployment:'gpt-5-mini-1',
   apiVersion:'2025-01-01-preview',
-  defaultTemplate:'general',chunkIntervalSeconds:'20',autoGenerateInterval:'120',darkMode:'system',retentionDays:'90',maskConfidential:'false',consentAcknowledged:'false',setupComplete:'false'};
+  defaultTemplate:'general',chunkIntervalSeconds:'8',autoGenerateInterval:'120',darkMode:'system',retentionDays:'90',maskConfidential:'false',consentAcknowledged:'false',setupComplete:'false'};
 
 // ─── REDUCER ──────────────────────────────────────────────────────────────────
 // sessionStore: in-memory fallback when IndexedDB is unavailable
@@ -826,9 +826,19 @@ function Provider({children}){
     startCamera:async()=>{try{await AudioCapture.startCamera();d({type:'SET_CAM',p:true});Toast.success('Camera active.');}catch(e){Toast.error(e.message);}},
     stopCamera:()=>{AudioCapture.stopCamera();d({type:'SET_CAM',p:false});},
 
-    startRecording:async(title,template,participants)=>{
-      if(!s.micActive&&!s.screenAudioActive){Toast.error('Enable mic or meeting audio first.');return;}
+    startRecording:async(title,template,participants,sources='mic')=>{
       d({type:'SET_REC_STATUS',p:'starting'});
+      // Activate requested audio sources
+      let micOk=false,screenOk=false;
+      if(sources==='mic'||sources==='both'){
+        try{await AudioCapture.startMic();d({type:'SET_MIC',p:true});micOk=true;}
+        catch(e){Toast.warning('Mic: '+e.message);}
+      }
+      if(sources==='screen'||sources==='both'){
+        try{await AudioCapture.startScreenAudio();d({type:'SET_SCREEN',p:true});screenOk=true;}
+        catch(e){Toast.warning('Meeting audio: '+e.message);}
+      }
+      if(!micOk&&!screenOk){d({type:'SET_REC_STATUS',p:'idle'});Toast.error('No audio source available. Check permissions.');return;}
       const _now=new Date(),_pad=n=>String(n).padStart(2,'0'),_defaultTitle=`Meeting — ${_now.getDate()} ${_now.toLocaleString('default',{month:'short'})} ${_now.getFullYear()} ${_pad(_now.getHours())}:${_pad(_now.getMinutes())}`;
       const id=Date.now(),meeting={id,title:title||_defaultTitle,date:new Date().toISOString(),status:'recording',template:template||'general',participants:participants||s.participants,duration:0};
       // Always keep a session copy (survives even when DB unavailable)
@@ -1546,73 +1556,100 @@ function NewMeetingModal({onStart,onClose}){
   const[template,setTemplate]=useState(s.settings.defaultTemplate||'general');
   const[pInput,setPInput]=useState('');
   const[participants,setParticipants]=useState(s.settings.userName?[s.settings.userName]:[]);
+  const[sources,setSources]=useState('mic'); // 'mic' | 'screen' | 'both'
 
   const addP=()=>{const v=pInput.trim();if(v&&!participants.includes(v)){setParticipants(p=>[...p,v]);setPInput('');}};
   const removeP=n=>setParticipants(p=>p.filter(x=>x!==n));
 
+  const SOURCE_OPTS=[
+    {k:'mic',icon:'mic',label:'Microphone',desc:'Your voice — in-person or hybrid'},
+    {k:'screen',icon:'monitor',label:'Meeting Audio',desc:'Teams/Meet/Zoom — share tab or screen'},
+    {k:'both',icon:'mic',label:'Mic + Meeting Audio',desc:'Capture both your voice and the meeting'},
+  ];
+
   return(
-    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:'20px'}}>
-      <div style={{background:'var(--bg-1)',border:'1px solid var(--border-2)',borderRadius:'18px',padding:'28px',width:'100%',maxWidth:'480px',boxShadow:'0 25px 60px rgba(0,0,0,.6)'}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'22px'}}>
-          <h2 style={{margin:0,fontSize:'1.1rem',fontWeight:'700',color:'var(--txt)'}}>New Meeting</h2>
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.65)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:'20px',backdropFilter:'blur(4px)'}}>
+      <div style={{background:'var(--bg-1)',border:'1px solid var(--border-2)',borderRadius:'20px',padding:'28px',width:'100%',maxWidth:'520px',boxShadow:'0 25px 60px rgba(0,0,0,.4)',maxHeight:'90vh',overflowY:'auto'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'24px'}}>
+          <h2 style={{margin:0,fontSize:'1.15rem',fontWeight:'700',color:'var(--txt)'}}>New Meeting</h2>
           <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:'var(--txt-3)',padding:'4px'}}><Ic n="x" sz={18}/></button>
         </div>
 
-        <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+        <div style={{display:'flex',flexDirection:'column',gap:'20px'}}>
+
+          {/* Title */}
           <div>
-            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>MEETING TITLE</label>
+            <label style={{display:'block',fontSize:'.78rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px',letterSpacing:'.05em'}}>MEETING TITLE</label>
             <input className="inp" placeholder={`Meeting — ${new Date().getDate()} ${new Date().toLocaleString('default',{month:'short'})} ${new Date().getFullYear()} ${String(new Date().getHours()).padStart(2,'0')}:${String(new Date().getMinutes()).padStart(2,'0')}`} value={title} onChange={e=>setTitle(e.target.value)} autoFocus/>
           </div>
+
+          {/* Audio Source */}
           <div>
-            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'8px'}}>TEMPLATE</label>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
+            <label style={{display:'block',fontSize:'.78rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'10px',letterSpacing:'.05em'}}>AUDIO SOURCE</label>
+            <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
+              {SOURCE_OPTS.map(o=>(
+                <div key={o.k} onClick={()=>setSources(o.k)} style={{display:'flex',alignItems:'center',gap:'12px',padding:'12px 14px',borderRadius:'11px',border:`2px solid ${sources===o.k?'#6366f1':'var(--border-2)'}`,background:sources===o.k?'rgba(99,102,241,.06)':'var(--bg-2)',cursor:'pointer',transition:'all .15s'}}>
+                  <div style={{width:36,height:36,borderRadius:'9px',background:sources===o.k?'rgba(99,102,241,.12)':'var(--bg-3)',display:'flex',alignItems:'center',justifyContent:'center',border:`1px solid ${sources===o.k?'rgba(99,102,241,.3)':'var(--border-2)'}`,flexShrink:0}}>
+                    <Ic n={o.icon} sz={18} cls="" style={{color:sources===o.k?'#6366f1':'var(--txt-3)'}}/>
+                    {o.k==='both'&&<Ic n="monitor" sz={14} cls="" style={{color:sources===o.k?'#6366f1':'var(--txt-3)',marginLeft:'-4px'}}/>}
+                  </div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:'.875rem',fontWeight:'600',color:sources===o.k?'var(--txt)':'var(--txt-2)'}}>{o.label}</div>
+                    <div style={{fontSize:'.75rem',color:'var(--txt-3)',marginTop:'1px'}}>{o.desc}</div>
+                  </div>
+                  <div style={{width:18,height:18,borderRadius:'50%',border:`2px solid ${sources===o.k?'#6366f1':'var(--border-2)'}`,background:sources===o.k?'#6366f1':'transparent',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+                    {sources===o.k&&<div style={{width:7,height:7,borderRadius:'50%',background:'#fff'}}/>}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {(sources==='screen'||sources==='both')&&(
+              <div style={{marginTop:'8px',fontSize:'.75rem',color:'var(--txt-3)',padding:'0 2px'}}>
+                💡 You'll be prompted to share your screen or a tab when recording starts. Tick <strong>"Share tab audio"</strong> or <strong>"Also share system audio"</strong>.
+              </div>
+            )}
+          </div>
+
+          {/* Template */}
+          <div>
+            <label style={{display:'block',fontSize:'.78rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'8px',letterSpacing:'.05em'}}>TEMPLATE</label>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'7px'}}>
               {Object.entries(TEMPLATES).map(([k,t])=>(
-                <div key={k} onClick={()=>setTemplate(k)} style={{padding:'10px 12px',borderRadius:'9px',border:`1px solid ${template===k?t.color+'88':'var(--border-2)'}`,background:template===k?t.color+'18':'var(--bg-2)',cursor:'pointer',display:'flex',alignItems:'center',gap:'8px',transition:'all .15s'}}>
-                  <span style={{fontSize:'16px'}}>{t.icon}</span>
+                <div key={k} onClick={()=>setTemplate(k)} style={{padding:'9px 12px',borderRadius:'9px',border:`1px solid ${template===k?t.color+'88':'var(--border-2)'}`,background:template===k?t.color+'18':'var(--bg-2)',cursor:'pointer',display:'flex',alignItems:'center',gap:'8px',transition:'all .15s'}}>
+                  <span style={{fontSize:'15px'}}>{t.icon}</span>
                   <span style={{fontSize:'.8rem',fontWeight:'600',color:template===k?'var(--txt)':'var(--txt-3)'}}>{t.label}</span>
                 </div>
               ))}
             </div>
           </div>
+
+          {/* Participants */}
           <div>
-            <label style={{display:'block',fontSize:'.8rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'6px'}}>PARTICIPANTS</label>
+            <label style={{display:'block',fontSize:'.78rem',fontWeight:'600',color:'var(--txt-3)',marginBottom:'8px',letterSpacing:'.05em'}}>PARTICIPANTS</label>
             <div style={{display:'flex',gap:'8px',marginBottom:'8px'}}>
               <input className="inp" placeholder="Add participant name" value={pInput} onChange={e=>setPInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();addP();}}} style={{flex:1}}/>
               <button className="btn btn-secondary btn-sm" onClick={addP}><Ic n="plus" sz={14}/></button>
             </div>
             <div style={{display:'flex',flexWrap:'wrap',gap:'6px'}}>
-              {participants.map(p=>(
-                <span key={p} style={{display:'inline-flex',alignItems:'center',gap:'5px',padding:'4px 10px',borderRadius:'999px',background:'rgba(99,102,241,.15)',border:'1px solid rgba(99,102,241,.3)',fontSize:'.8rem',color:'var(--brand-t)'}}>
-                  {p} <button onClick={()=>removeP(p)} style={{background:'none',border:'none',cursor:'pointer',color:'#6366f1',padding:0,display:'flex'}}><Ic n="x" sz={12}/></button>
-                </span>
-              ))}
+              {participants.length===0
+                ?<span style={{fontSize:'.75rem',color:'var(--txt-3)'}}>No participants added</span>
+                :participants.map(p=>(
+                  <span key={p} style={{display:'inline-flex',alignItems:'center',gap:'5px',padding:'4px 10px',borderRadius:'999px',background:'rgba(99,102,241,.12)',border:'1px solid rgba(99,102,241,.25)',fontSize:'.8rem',color:'var(--brand-t)'}}>
+                    {p} <button onClick={()=>removeP(p)} style={{background:'none',border:'none',cursor:'pointer',color:'#6366f1',padding:0,display:'flex'}}><Ic n="x" sz={11}/></button>
+                  </span>
+                ))
+              }
             </div>
           </div>
         </div>
 
         <div style={{display:'flex',gap:'10px',marginTop:'24px'}}>
           <button className="btn btn-ghost" style={{flex:1}} onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" style={{flex:2,justifyContent:'center'}} onClick={()=>onStart(title,template,participants)}>
+          <button className="btn btn-primary" style={{flex:2,justifyContent:'center',padding:'11px'}} onClick={()=>onStart(title,template,participants,sources)}>
             <Ic n="play" sz={15}/> Start Recording
           </button>
         </div>
       </div>
-    </div>
-  );
-}
-
-// ─── CAPTURE STATUS CARD ──────────────────────────────────────────────────────
-function CaptureCard({icon,label,active,hasAudio,onStart,onStop,description,loading}){
-  return(
-    <div className="card" style={{flex:1,minWidth:140,background:active?'rgba(16,185,129,.06)':'var(--bg-2)',borderColor:active?'rgba(16,185,129,.4)':'var(--border-2)',cursor:'pointer',userSelect:'none'}} onClick={active?onStop:onStart}>
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'8px'}}>
-        <div style={{width:36,height:36,borderRadius:'10px',background:active?'rgba(16,185,129,.15)':'var(--bg-1)',display:'flex',alignItems:'center',justifyContent:'center',border:`1px solid ${active?'rgba(16,185,129,.3)':'var(--border)'}`}}>
-          {loading?<Spin sz={16}/>:<Ic n={icon} sz={18} cls="" style={{color:active?'#34d399':'var(--txt-3)'}}/>}
-        </div>
-        <div style={{width:8,height:8,borderRadius:'50%',background:active?'#10b981':'#374151',boxShadow:active?'0 0 6px #10b981':'none',transition:'all .3s'}}/>
-      </div>
-      <div style={{fontSize:'.85rem',fontWeight:'700',color:active?'#a7f3d0':'var(--txt)',marginBottom:'3px'}}>{label}</div>
-      <div style={{fontSize:'.72rem',color:active?'#6ee7b7':'var(--txt-3)'}}>{active?(hasAudio!==undefined?hasAudio?'Audio captured':'Active (no audio)':'Active — click to stop'):description}</div>
     </div>
   );
 }
@@ -1769,8 +1806,45 @@ function LiveTranscript(){
   const bottomRef=useRef(null);
   const[editingSpeaker,setEditingSpeaker]=useState(null);
   const[speakerVal,setSpeakerVal]=useState('');
+  const[liveText,setLiveText]=useState('');        // Web Speech interim text
+  const recognitionRef=useRef(null);
 
-  useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:'smooth'});},[s.transcriptChunks.length]);
+  useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:'smooth'});},[s.transcriptChunks.length,liveText]);
+
+  // ── Web Speech API: show real-time text as user speaks ──────────────────────
+  useEffect(()=>{
+    const isRec=s.recordingStatus==='recording';
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR||!isRec||!s.micActive){
+      if(recognitionRef.current){try{recognitionRef.current.stop();}catch{}recognitionRef.current=null;}
+      setLiveText('');
+      return;
+    }
+    // Only start if not already running
+    if(recognitionRef.current) return;
+    const rec=new SR();
+    rec.continuous=true;
+    rec.interimResults=true;
+    rec.lang=s.settings.preferredLanguage==='auto'?'':s.settings.preferredLanguage||'en-US';
+    rec.maxAlternatives=1;
+    rec.onresult=e=>{
+      let interim='';
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        if(!e.results[i].isFinal) interim+=e.results[i][0].transcript;
+      }
+      setLiveText(interim);
+    };
+    rec.onerror=()=>{};
+    rec.onend=()=>{
+      // Auto-restart if still recording (recognition stops after ~60s of silence)
+      if(s.recordingStatus==='recording'&&s.micActive&&recognitionRef.current){
+        try{recognitionRef.current.start();}catch{}
+      }
+    };
+    try{rec.start();}catch{}
+    recognitionRef.current=rec;
+    return()=>{try{rec.stop();}catch{}recognitionRef.current=null;setLiveText('');};
+  },[s.recordingStatus,s.micActive]);
 
   const assignSpeaker=(id,speaker)=>{d({type:'UPD_SPEAKER',p:{id,speaker}});setEditingSpeaker(null);};
 
@@ -1784,7 +1858,8 @@ function LiveTranscript(){
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'12px'}}>
         <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
           <div style={{fontSize:'.78rem',fontWeight:'700',color:'var(--txt-3)',letterSpacing:'.06em',textTransform:'uppercase'}}>Live Transcript</div>
-          {s.isTranscribing&&<div style={{display:'flex',alignItems:'center',gap:'5px',fontSize:'.72rem',color:'#6366f1'}}><Spin sz={11}/> transcribing</div>}
+          {liveText&&<div style={{display:'flex',alignItems:'center',gap:'4px',fontSize:'.7rem',color:'#10b981',fontWeight:'600'}}><div className="rec-dot" style={{width:6,height:6}}/> Live</div>}
+          {s.isTranscribing&&!liveText&&<div style={{display:'flex',alignItems:'center',gap:'5px',fontSize:'.72rem',color:'#6366f1'}}><Spin sz={11}/> transcribing</div>}
         </div>
         <div style={{display:'flex',gap:'6px'}}>
           {s.transcriptChunks.length>0&&<button className="btn btn-ghost btn-sm" onClick={copyAll}><Ic n="copy" sz={12}/> Copy</button>}
@@ -1793,11 +1868,11 @@ function LiveTranscript(){
       </div>
 
       <div style={{flex:1,overflowY:'auto',display:'flex',flexDirection:'column',gap:'12px',paddingRight:'4px'}}>
-        {s.transcriptChunks.length===0?(
+        {s.transcriptChunks.length===0&&!liveText?(
           <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:'var(--txt-3)',textAlign:'center',padding:'32px'}}>
             <div style={{fontSize:'32px',marginBottom:'12px'}}>🎙️</div>
             <div style={{fontSize:'.875rem',color:'var(--txt-2)'}}>Transcript will appear here</div>
-            <div style={{fontSize:'.78rem',color:'var(--txt-3)',marginTop:'4px'}}>Start recording to begin</div>
+            <div style={{fontSize:'.78rem',color:'var(--txt-3)',marginTop:'4px'}}>Start speaking — text appears instantly</div>
           </div>
         ):s.transcriptChunks.map((chunk)=>(
           <div key={chunk.id} className="fade-slide" style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'10px',padding:'12px'}}>
@@ -1830,6 +1905,16 @@ function LiveTranscript(){
             </p>
           </div>
         ))}
+        {liveText&&(
+          <div className="fade-slide" style={{background:'rgba(16,185,129,.04)',border:'1px dashed rgba(16,185,129,.3)',borderRadius:'10px',padding:'12px',opacity:.9}}>
+            <div style={{display:'flex',alignItems:'center',gap:'6px',marginBottom:'5px'}}>
+              <div className="rec-dot" style={{width:6,height:6}}/>
+              <span style={{fontSize:'.7rem',color:'#34d399',fontWeight:'600',letterSpacing:'.05em'}}>LIVE</span>
+              {s.settings.userName&&<span style={{fontSize:'.72rem',color:'var(--brand-t)',fontWeight:'500'}}>{s.settings.userName}</span>}
+            </div>
+            <p style={{margin:0,fontSize:'.875rem',color:'var(--txt)',lineHeight:'1.6',fontStyle:'italic'}}>{liveText}</p>
+          </div>
+        )}
         <div ref={bottomRef}/>
       </div>
     </div>
@@ -2129,7 +2214,12 @@ function RecordingStudio(){
   const handleStartScreen=async()=>{setScreenLoading(true);await ax.startScreen();setScreenLoading(false);};
   const handleStartCam=async()=>{setCamLoading(true);await ax.startCamera();setCamLoading(false);};
 
-  const doStart=(title,template,participants)=>{setShowModal(false);ax.startRecording(title,template,participants);};
+  const doStart=(title,template,participants,sources)=>{setShowModal(false);ax.startRecording(title,template,participants,sources);};
+
+  const isIdle=s.recordingStatus==='idle';
+  const isActive=s.recordingStatus==='recording'||s.recordingStatus==='paused';
+  const isDone=s.recordingStatus==='done';
+  const isStopping=s.recordingStatus==='stopping'||s.recordingStatus==='starting';
 
   return(
     <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
@@ -2139,19 +2229,8 @@ function RecordingStudio(){
       {hasFolder===false&&!folderDismissed&&FileSystemService.isSupported()&&(
         <div style={{background:'rgba(59,130,246,.06)',borderBottom:'1px solid rgba(59,130,246,.2)',padding:'9px 20px',display:'flex',alignItems:'center',gap:'10px',flexShrink:0,fontSize:'.8rem'}}>
           <Ic n="folder" sz={15} cls="" style={{color:'#60a5fa',flexShrink:0}}/>
-          <span style={{color:'var(--txt-2)',flex:1}}>
-            <strong style={{color:'#60a5fa'}}>Tip:</strong> Pick a workspace folder to auto-save every meeting to your computer — unlimited history, no browser storage limits.
-          </span>
-          <button className="btn btn-ghost btn-sm" style={{borderColor:'rgba(59,130,246,.3)',color:'#60a5fa'}}
-            onClick={async()=>{
-              try{
-                const h=await FileSystemService.pickFolder();
-                setHasFolder(true);
-                Toast.success(`Workspace set: ${h.name}`);
-              }catch(e){if(!e.message.includes('aborted')&&!e.message.includes('dismissed'))Toast.error(e.message);}
-            }}>
-            <Ic n="folder" sz={12}/> Pick Folder
-          </button>
+          <span style={{color:'var(--txt-2)',flex:1}}><strong style={{color:'#60a5fa'}}>Tip:</strong> Pick a workspace folder in Settings to auto-save every meeting to your computer.</span>
+          <button className="btn btn-ghost btn-sm" style={{borderColor:'rgba(59,130,246,.3)',color:'#60a5fa'}} onClick={async()=>{try{const h=await FileSystemService.pickFolder();setHasFolder(true);Toast.success(`Workspace set: ${h.name}`);}catch(e){if(!e.message.includes('aborted')&&!e.message.includes('dismissed'))Toast.error(e.message);}}}><Ic n="folder" sz={12}/> Pick Folder</button>
           <button onClick={()=>setFolderDismissed(true)} style={{background:'none',border:'none',cursor:'pointer',color:'var(--txt-3)',padding:'2px',display:'flex'}}><Ic n="x" sz={14}/></button>
         </div>
       )}
@@ -2167,87 +2246,59 @@ function RecordingStudio(){
 
       <div style={{flex:1,overflow:'auto',padding:'20px',display:'flex',flexDirection:'column',gap:'16px'}}>
 
-        {/* Capture row */}
-        <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
-          <div style={{display:'flex',gap:'12px',flexWrap:'wrap'}}>
-            <CaptureCard icon="mic" label="Microphone" active={s.micActive} onStart={handleStartMic} onStop={ax.stopMic} description="Your mic — for in-person or hybrid" loading={micLoading}/>
-            <CaptureCard icon="monitor" label="Meeting Audio" active={s.screenAudioActive} onStart={handleStartScreen} onStop={ax.stopScreen} description="Teams / Meet / Zoom — share tab or screen" hasAudio={s.screenAudioActive} loading={screenLoading}/>
-            <CaptureCard icon="video" label="Camera" active={s.cameraActive} onStart={handleStartCam} onStop={ax.stopCamera} description="Optional video preview" loading={camLoading}/>
-            {s.cameraActive&&<CameraPreview/>}
-          </div>
-          {/* Combined sources status */}
-          {(s.micActive||s.screenAudioActive)&&(
-            <div style={{display:'flex',alignItems:'center',gap:'10px',padding:'9px 14px',background:'rgba(16,185,129,.06)',border:'1px solid rgba(16,185,129,.2)',borderRadius:'10px',fontSize:'.8rem',flexWrap:'wrap'}}>
-              <span style={{color:'#34d399',fontWeight:'700'}}>🎙 Active sources:</span>
-              {s.micActive&&<span style={{background:'rgba(16,185,129,.12)',border:'1px solid rgba(16,185,129,.3)',color:'#6ee7b7',padding:'2px 10px',borderRadius:'999px'}}>Microphone</span>}
-              {s.micActive&&s.screenAudioActive&&<span style={{color:'var(--txt-2)'}}>+</span>}
-              {s.screenAudioActive&&<span style={{background:'rgba(16,185,129,.12)',border:'1px solid rgba(16,185,129,.3)',color:'#6ee7b7',padding:'2px 10px',borderRadius:'999px'}}>Meeting Audio</span>}
-              <span style={{color:'var(--txt-2)',marginLeft:'4px'}}>— both will be mixed and transcribed together</span>
-              {!s.micActive&&s.screenAudioActive&&(
-                <button className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}} onClick={handleStartMic} disabled={micLoading}>
-                  {micLoading?<Spin sz={12}/>:<Ic n="mic" sz={12}/>} Add mic too
-                </button>
-              )}
-              {s.micActive&&!s.screenAudioActive&&(
-                <button className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}} onClick={handleStartScreen} disabled={screenLoading}>
-                  {screenLoading?<Spin sz={12}/>:<Ic n="monitor" sz={12}/>} Add meeting audio
-                </button>
-              )}
+        {/* ── IDLE STATE: just a big start button ── */}
+        {isIdle&&(
+          <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:'24px',padding:'40px 20px',minHeight:320}}>
+            <div style={{textAlign:'center'}}>
+              <div style={{width:72,height:72,borderRadius:'20px',background:'rgba(99,102,241,.1)',border:'2px solid rgba(99,102,241,.25)',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 16px'}}>
+                <Ic n="mic" sz={32} cls="" style={{color:'#6366f1'}}/>
+              </div>
+              <div style={{fontSize:'1.2rem',fontWeight:'700',color:'var(--txt)',marginBottom:'6px'}}>Ready to record</div>
+              <div style={{fontSize:'.875rem',color:'var(--txt-3)'}}>Start a new meeting to begin transcription and AI notes</div>
             </div>
-          )}
-        </div>
+            <button className="btn btn-primary" style={{padding:'14px 40px',fontSize:'1rem',borderRadius:'12px'}} onClick={()=>setShowModal(true)}>
+              <Ic n="plus" sz={18}/> New Meeting
+            </button>
+          </div>
+        )}
 
-        {/* Controls + participants row */}
-        <div style={{display:'flex',gap:'12px',flexWrap:'wrap',alignItems:'flex-start'}}>
-          <div style={{flex:2,minWidth:300}}>
-            <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'16px',display:'flex',alignItems:'center',gap:'14px',flexWrap:'wrap'}}>
+        {/* ── STARTING state ── */}
+        {isStopping&&(
+          <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',gap:'12px',color:'var(--txt-3)',padding:'40px'}}>
+            <Spin sz={20}/> <span style={{fontSize:'.95rem'}}>{s.recordingStatus==='starting'?'Starting recording…':'Finishing up…'}</span>
+          </div>
+        )}
+
+        {/* ── ACTIVE / DONE: compact header + transcript/notes ── */}
+        {(isActive||isDone||s.recordingStatus==='stopping')&&(
+          <>
+            {/* Meeting header bar */}
+            <div style={{background:'var(--bg-2)',border:'1px solid var(--border-2)',borderRadius:'12px',padding:'12px 16px',display:'flex',alignItems:'center',gap:'12px',flexWrap:'wrap',flexShrink:0}}>
               {s.currentMeeting&&(
-                <div style={{marginRight:'auto'}}>
-                  <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
-                    <span style={{fontSize:'18px'}}>{TEMPLATES[s.currentMeeting.template]?.icon||'📋'}</span>
-                    <span style={{fontSize:'.875rem',fontWeight:'600',color:'var(--txt)',maxWidth:220,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.currentMeeting.title}</span>
-                  </div>
+                <div style={{display:'flex',alignItems:'center',gap:'8px',marginRight:'auto'}}>
+                  <span style={{fontSize:'18px'}}>{TEMPLATES[s.currentMeeting.template]?.icon||'📋'}</span>
+                  <span style={{fontSize:'.875rem',fontWeight:'600',color:'var(--txt)',maxWidth:280,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.currentMeeting.title}</span>
+                  {/* Active source pills */}
+                  {s.micActive&&<span style={{background:'rgba(16,185,129,.1)',border:'1px solid rgba(16,185,129,.3)',color:'#34d399',padding:'2px 9px',borderRadius:'999px',fontSize:'.72rem',fontWeight:'600',flexShrink:0}}>Mic</span>}
+                  {s.screenAudioActive&&<span style={{background:'rgba(16,185,129,.1)',border:'1px solid rgba(16,185,129,.3)',color:'#34d399',padding:'2px 9px',borderRadius:'999px',fontSize:'.72rem',fontWeight:'600',flexShrink:0}}>Meeting Audio</span>}
                 </div>
               )}
               <RecordingControls onNewMeeting={()=>setShowModal(true)}/>
             </div>
-          </div>
-          <div style={{flex:1,minWidth:220}}><ParticipantPanel/></div>
-        </div>
 
-        {/* Teams / platform capture guide */}
-        {s.recordingStatus==='idle'&&!s.micActive&&!s.screenAudioActive&&(
-          <div style={{background:'rgba(99,102,241,.06)',border:'1px solid rgba(99,102,241,.2)',borderRadius:'10px',padding:'12px 16px',fontSize:'.82rem',color:'var(--txt-3)',lineHeight:'1.7'}}>
-            <span style={{color:'var(--brand-t)',fontWeight:'700'}}>📋 How to capture your meeting audio:</span>
-            <div style={{marginTop:'6px',display:'flex',flexDirection:'column',gap:'4px'}}>
-              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Teams / Meet / Zoom in browser:</span> Click <strong style={{color:'var(--txt)'}}>Meeting Audio</strong> → select the meeting tab → tick <em>"Share tab audio"</em></div>
-              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Teams desktop app (Windows):</span> Click <strong style={{color:'var(--txt)'}}>Meeting Audio</strong> → select <em>"Entire Screen"</em> → tick <em>"Also share system audio"</em></div>
-              <div><span style={{color:'#6366f1',fontWeight:'600'}}>Physical room / in-person:</span> Click <strong style={{color:'var(--txt)'}}>Microphone</strong> to capture your mic directly</div>
+            {/* Attention Card */}
+            {isActive&&<AttentionCard/>}
+
+            {/* Transcript + Notes */}
+            <div style={{flex:1,display:'grid',gridTemplateColumns:'1fr 1fr',gap:'16px',minHeight:420}}>
+              <div style={{background:'var(--bg-1)',border:'1px solid var(--border)',borderRadius:'14px',padding:'16px',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+                <LiveTranscript/>
+              </div>
+              <div style={{background:'var(--bg-1)',border:'1px solid var(--border)',borderRadius:'14px',padding:'16px',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+                <AINotes/>
+              </div>
             </div>
-          </div>
-        )}
-
-        {/* Speaker mode notice */}
-        {(s.recordingStatus==='recording'||s.recordingStatus==='paused')&&(
-          <div style={{background:'var(--bg-2)',border:'1px solid #4f46e5',borderRadius:'10px',padding:'10px 14px',fontSize:'.8rem',color:'var(--txt-3)',display:'flex',alignItems:'center',gap:'8px'}}>
-            <span style={{color:'#6366f1',fontWeight:'700'}}>Speaker Mode:</span>
-            Click "+ speaker" on any transcript segment to assign a speaker. Add participant names above for quick assignment. AI suggestions are context-based and may be inaccurate.
-          </div>
-        )}
-
-        {/* Attention Card */}
-        {(s.recordingStatus==='recording'||s.recordingStatus==='paused')&&<AttentionCard/>}
-
-        {/* Transcript + Notes split */}
-        {(s.recordingStatus==='recording'||s.recordingStatus==='paused'||s.recordingStatus==='done'||s.recordingStatus==='stopping')&&(
-          <div style={{flex:1,display:'grid',gridTemplateColumns:'1fr 1fr',gap:'16px',minHeight:400}}>
-            <div style={{background:'var(--bg-1)',border:'1px solid var(--border)',borderRadius:'14px',padding:'16px',display:'flex',flexDirection:'column',overflow:'hidden'}}>
-              <LiveTranscript/>
-            </div>
-            <div style={{background:'var(--bg-1)',border:'1px solid var(--border)',borderRadius:'14px',padding:'16px',display:'flex',flexDirection:'column',overflow:'hidden'}}>
-              <AINotes/>
-            </div>
-          </div>
+          </>
         )}
 
         {/* Export when done */}
