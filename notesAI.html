@@ -294,6 +294,9 @@ var AzureWhisper = (() => {
     form.append('file',blob,`chunk_${meta.chunkId||Date.now()}.${ext}`);
     form.append('response_format','json');
     if(preferredLanguage&&preferredLanguage!=='auto') form.append('language',preferredLanguage);
+    // Always guide Whisper to use Devanagari for Hindi — prevents Urdu/Arabic script output
+    // This prompt is a hint: Whisper ignores it for pure English; it activates for Hindi/Hinglish
+    form.append('prompt','Transcribe Hindi and Hinglish (mixed Hindi-English) using Devanagari script for Hindi words — NOT Urdu or Arabic script. Preserve English words in Latin script. Example: "यह meeting बहुत important है"');
     const url=`${azureEndpoint.replace(/\/$/,'')}/openai/deployments/${whisperDeployment}/audio/transcriptions?api-version=${apiVersion||'2024-02-01'}`;
     const res=await fetch(url,{method:'POST',headers:{'api-key':azureApiKey},body:form});
     if(!res.ok){const e=await res.text(); if(res.status===401)throw new Error('Azure API key invalid.'); if(res.status===404)throw new Error(`Whisper deployment "${whisperDeployment}" not found.`); if(res.status===429)throw new Error('Rate limit exceeded. Wait and retry.'); throw new Error(`Whisper error ${res.status}: ${e.slice(0,180)}`);}
@@ -317,18 +320,32 @@ SPEAKER ATTRIBUTION RULES:
 - When attribution is uncertain, use "Unknown" rather than guessing wildly.
 - Always populate the "speaker" field in importantQuotes and "madeBy" in decisions/actionItems with a participant name where possible.`;
 
-  function prompt(text,template,participants,title){
+  const MEETING_TYPE_HINTS={
+    'Interview':'Focus on: candidate strengths/weaknesses, key answers, technical competency signals, cultural fit, hire/no-hire indicators, follow-up questions needed.',
+    'Vendor Negotiation':'Focus on: pricing discussed, contractual commitments made, red flags, vendor promises, negotiation outcomes, next steps and approvals needed.',
+    'Management Meeting':'Focus on: KPI updates, team health, escalations, strategic decisions, budget implications, accountability gaps.',
+    '1-on-1':'Focus on: personal development goals, feedback exchanged, concerns raised, career progression topics, manager commitments.',
+    'Team Standup':'Focus on: per-person updates, blockers, sprint progress, cross-team dependencies, items needing follow-up.',
+    'Client Call':'Focus on: client requirements and concerns, promises made to client, scope changes, satisfaction signals, deliverable dates committed.',
+    'Training':'Focus on: topics covered, key learnings, questions raised, competency gaps identified, follow-up resources needed.',
+    'All-Hands':'Focus on: announcements, strategic direction, Q&A themes, employee sentiment, leadership commitments.',
+    'Project Review':'Focus on: milestones hit/missed, risks, budget vs. actual, decisions taken, go/no-go signals.',
+  };
+  function prompt(text,template,participants,title,meetingType){
     const pList=participants?.length?participants.join(', '):'Not specified';
     const diarNote=participants?.length
       ? `\nIMPORTANT: Use the participants list [${pList}] to attribute statements to specific people wherever the context allows. Look for: someone being addressed by name, first-person "I will..." statements that match a role, questions directed at a specific person, technical language suggesting a specific role.`
       : '';
-    return `Meeting: ${title||'Untitled'}\nTemplate: ${template||'General'}\nParticipants: ${pList}${diarNote}\nTranscript:\n${text}\n\nReturn JSON:\n{"executiveSummary":"","discussionPoints":[],"decisions":[{"decision":"","madeBy":"","impact":"low|medium|high"}],"actionItems":[{"action":"","owner":"","dueDate":"","priority":"low|medium|high","status":"open"}],"risks":[{"risk":"","severity":"low|medium|high","mitigation":""}],"openQuestions":[],"importantQuotes":[{"quote":"","speaker":"","context":""}],"followUpEmail":{"subject":"","body":""},"meetingQuality":{"score":0,"positives":[],"improvements":[],"engagement":"low|medium|high"},"missedAccountability":[]}`;
+    const typeHint=meetingType&&MEETING_TYPE_HINTS[meetingType]
+      ? `\nMEETING TYPE: ${meetingType}. ${MEETING_TYPE_HINTS[meetingType]}`
+      : '';
+    return `Meeting: ${title||'Untitled'}\nTemplate: ${template||'General'}${typeHint}\nParticipants: ${pList}${diarNote}\nTranscript:\n${text}\n\nReturn JSON:\n{"executiveSummary":"","discussionPoints":[],"decisions":[{"decision":"","madeBy":"","impact":"low|medium|high"}],"actionItems":[{"action":"","owner":"","dueDate":"","priority":"low|medium|high","status":"open"}],"risks":[{"risk":"","severity":"low|medium|high","mitigation":""}],"openQuestions":[],"importantQuotes":[{"quote":"","speaker":"","context":""}],"followUpEmail":{"subject":"","body":""},"meetingQuality":{"score":0,"positives":[],"improvements":[],"engagement":"low|medium|high"},"missedAccountability":[]}`;
   }
   async function generateNotes(text,settings,meta={}){
     const{azureEndpoint,azureApiKey,chatDeployment,apiVersion}=settings;
     if(!azureEndpoint||!azureApiKey||!chatDeployment) throw new Error('Azure Chat not configured. Check Settings.');
     const url=`${azureEndpoint.replace(/\/$/,'')}/openai/deployments/${chatDeployment}/chat/completions?api-version=${apiVersion||'2024-02-01'}`;
-    const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','api-key':azureApiKey},body:JSON.stringify({messages:[{role:'system',content:SYS},{role:'user',content:prompt(text,meta.template,meta.participants,meta.title)}],max_completion_tokens:3000,response_format:{type:'json_object'}})});
+    const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','api-key':azureApiKey},body:JSON.stringify({messages:[{role:'system',content:SYS},{role:'user',content:prompt(text,meta.template,meta.participants,meta.title,meta.meetingType)}],max_completion_tokens:3000,response_format:{type:'json_object'}})});
     if(!res.ok){const e=await res.text(); if(res.status===401)throw new Error('API key invalid.'); if(res.status===404)throw new Error(`Chat deployment "${chatDeployment}" not found.`); throw new Error(`Chat error ${res.status}: ${e.slice(0,180)}`);}
     const data=await res.json(), content=data.choices?.[0]?.message?.content;
     if(!content) throw new Error('Empty response from Azure Chat.');
@@ -508,8 +525,16 @@ var AudioCapture = (() => {
   function stopScreen(){if(screenStream){screenStream.getTracks().forEach(t=>t.stop());screenStream=null;}}
   function stopCamera(){if(cameraStream){cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;}}
   function getCameraStream(){return cameraStream;}
+  function muteMic(){if(micStream)micStream.getAudioTracks().forEach(t=>{t.enabled=false;});}
+  function unmuteMic(){if(micStream)micStream.getAudioTracks().forEach(t=>{t.enabled=true;});}
+  function isMicMuted(){const t=micStream?.getAudioTracks()||[];return t.length>0&&!t[0].enabled;}
+  function getScreenVideoTrack(){
+    if(!screenStream)return null;
+    const vt=screenStream.getVideoTracks();
+    return vt.length?vt[0]:null;
+  }
   function getState(){return{micActive:!!(micStream?.active),screenActive:!!(screenStream?.active&&screenStream.getAudioTracks().length),cameraActive:!!(cameraStream?.active),isRecording:mediaRecorder?.state==='recording',isPaused:mediaRecorder?.state==='paused'};}
-  return{startMic,startScreenAudio,startCamera,startRecording,pauseRecording,resumeRecording,stopRecording,stopAll,stopMic,stopScreen,stopCamera,getCameraStream,getState};
+  return{startMic,startScreenAudio,startCamera,startRecording,pauseRecording,resumeRecording,stopRecording,stopAll,stopMic,stopScreen,stopCamera,getCameraStream,getScreenVideoTrack,muteMic,unmuteMic,isMicMuted,getState};
 })();
 
 // ═══════════════════════════════════════════════════════════════
@@ -711,6 +736,110 @@ window.ExportService    = ExportService;
 window.FileSystemService= FileSystemService;
 
 // ═══════════════════════════════════════════════════════════════
+// SPEAKER DETECTION SERVICE  (screen frame → GPT-4o vision)
+// ═══════════════════════════════════════════════════════════════
+var SpeakerDetectionService=(()=>{
+  let _settings=null,_videoTrack=null,_currentSpeaker='',_intervalId=null,_busy=false;
+
+  // Capture a JPEG frame from the screen share video track using a hidden <video> element
+  async function _captureFrame(){
+    if(!_videoTrack||_videoTrack.readyState!=='live') return null;
+    return new Promise((resolve)=>{
+      try{
+        const stream=new MediaStream([_videoTrack]);
+        const vid=document.createElement('video');
+        vid.muted=true;
+        vid.playsInline=true;
+        vid.srcObject=stream;
+        const cleanup=()=>{try{vid.srcObject=null;}catch{}};
+        vid.onloadedmetadata=async()=>{
+          try{
+            await vid.play();
+            // Wait one frame for render
+            await new Promise(r=>requestAnimationFrame(r));
+            const W=Math.min(vid.videoWidth||1280,960);
+            const scale=W/Math.max(vid.videoWidth||1,1);
+            const H=Math.round((vid.videoHeight||720)*scale);
+            const canvas=document.createElement('canvas');
+            canvas.width=W;canvas.height=H;
+            const ctx=canvas.getContext('2d');
+            ctx.drawImage(vid,0,0,W,H);
+            cleanup();
+            // Return base64 without data: prefix
+            resolve(canvas.toDataURL('image/jpeg',0.65).split(',')[1]||null);
+          }catch{cleanup();resolve(null);}
+        };
+        vid.onerror=()=>{cleanup();resolve(null);};
+        // Timeout safety
+        setTimeout(()=>{cleanup();resolve(null);},3000);
+      }catch{resolve(null);}
+    });
+  }
+
+  async function _detect(){
+    if(_busy||!_settings||!_videoTrack) return;
+    _busy=true;
+    try{
+      const base64=await _captureFrame();
+      if(!base64){_busy=false;return;}
+      const{azureEndpoint,azureApiKey,chatDeployment,apiVersion}=_settings;
+      if(!azureEndpoint||!azureApiKey||!chatDeployment){_busy=false;return;}
+      const url=`${azureEndpoint.replace(/\/$/,'')}/openai/deployments/${chatDeployment}/chat/completions?api-version=${apiVersion||'2024-02-01'}`;
+      const res=await fetch(url,{
+        method:'POST',
+        headers:{'Content-Type':'application/json','api-key':azureApiKey},
+        body:JSON.stringify({
+          messages:[{
+            role:'user',
+            content:[
+              {type:'image_url',image_url:{url:`data:image/jpeg;base64,${base64}`,detail:'low'}},
+              {type:'text',text:'This is a screenshot of a video call (Teams/Zoom/Meet/Webex). Identify the currently active/speaking participant. The active speaker has a colored border (blue, green, yellow) around their video tile, or a highlighted name bar, or a microphone animation. Look at ALL participant tiles carefully. Return ONLY valid JSON: {"speaker":"Full Name"} using the exact name shown in the meeting UI. If no active speaker is visible or it is unclear, return {"speaker":""}.'}
+            ]
+          }],
+          max_completion_tokens:60,
+          response_format:{type:'json_object'}
+        })
+      });
+      if(res.ok){
+        const data=await res.json();
+        const content=data.choices?.[0]?.message?.content;
+        if(content){
+          try{
+            const parsed=JSON.parse(content);
+            const name=(parsed.speaker||'').trim();
+            if(name) _currentSpeaker=name;
+          }catch{}
+        }
+      }
+    }catch(e){/* silent — vision may not be supported on current deployment */}
+    finally{_busy=false;}
+  }
+
+  function start(settings,videoTrack){
+    stop();
+    _settings=settings;
+    _videoTrack=videoTrack;
+    _currentSpeaker='';
+    if(!videoTrack){return;}
+    _detect(); // immediate first check
+    _intervalId=setInterval(_detect,4000); // then every 4 s
+  }
+
+  function stop(){
+    if(_intervalId){clearInterval(_intervalId);_intervalId=null;}
+    _videoTrack=null;
+    _currentSpeaker='';
+    _busy=false;
+  }
+
+  function getCurrentSpeaker(){return _currentSpeaker;}
+  function setSettings(s){_settings=s;}
+
+  return{start,stop,getCurrentSpeaker,setSettings};
+})();
+window.SpeakerDetectionService=SpeakerDetectionService;
+
+// ═══════════════════════════════════════════════════════════════
 // TEMPLATES
 // ═══════════════════════════════════════════════════════════════
 var TEMPLATES = {
@@ -744,14 +873,16 @@ const DEFAULT_SETTINGS={userName:'',organization:'',department:'',preferredLangu
 // Keyed by meetingId → {meeting, transcript:[], notes:null}
 const sessionStore={};
 
-const init={view:VIEWS.ONBOARDING,settings:DEFAULT_SETTINGS,settingsLoaded:false,currentMeeting:null,recordingStatus:'idle',micActive:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],isTranscribing:false,aiNotes:EMPTY_NOTES,isGeneratingNotes:false,lastNotesAt:null,meetings:[],selectedMeeting:null,selectedTranscript:[],selectedNotes:null,sidebarCollapsed:false,activeNotesTab:'summary',participants:[],showNewMeetingModal:false,attentionAlerts:[],attentionDismissed:false};
+const init={view:VIEWS.ONBOARDING,settings:DEFAULT_SETTINGS,settingsLoaded:false,currentMeeting:null,recordingStatus:'idle',micActive:false,micMuted:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],isTranscribing:false,aiNotes:EMPTY_NOTES,isGeneratingNotes:false,lastNotesAt:null,meetings:[],selectedMeeting:null,selectedTranscript:[],selectedNotes:null,sidebarCollapsed:false,activeNotesTab:'summary',participants:[],showNewMeetingModal:false,attentionAlerts:[],attentionDismissed:false,meetingType:''};
 
 function reducer(s,a){
   switch(a.type){
     case 'LOAD_SETTINGS':return{...s,settings:{...DEFAULT_SETTINGS,...a.p},settingsLoaded:true};
     case 'UPD_SETTINGS':return{...s,settings:{...s.settings,...a.p}};
     case 'SET_VIEW':return{...s,view:a.p};
-    case 'SET_MIC':return{...s,micActive:a.p};
+    case 'SET_MIC':return{...s,micActive:a.p,micMuted:false}; // unmute on new activation
+    case 'SET_MIC_MUTED':return{...s,micMuted:a.p};
+    case 'SET_MEETING_TYPE':return{...s,meetingType:a.p};
     case 'SET_SCREEN':return{...s,screenAudioActive:a.p};
     case 'SET_CAM':return{...s,cameraActive:a.p};
     case 'SET_REC_STATUS':return{...s,recordingStatus:a.p};
@@ -775,7 +906,7 @@ function reducer(s,a){
     case 'UPD_ATTENTION':return{...s,attentionAlerts:s.attentionAlerts.map(a2=>a2.id===a.p.id?{...a2,...a.p}:a2)};
     case 'DISMISS_ATTENTION':return{...s,attentionDismissed:true};
     case 'CLEAR_ATTENTION':return{...s,attentionAlerts:[],attentionDismissed:false};
-    case 'RESET':return{...s,currentMeeting:null,recordingStatus:'idle',micActive:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],aiNotes:EMPTY_NOTES,isTranscribing:false,isGeneratingNotes:false,participants:[],lastNotesAt:null,showNewMeetingModal:false,attentionAlerts:[],attentionDismissed:false};
+    case 'RESET':return{...s,currentMeeting:null,recordingStatus:'idle',micActive:false,micMuted:false,screenAudioActive:false,cameraActive:false,recordingTimer:0,transcriptChunks:[],aiNotes:EMPTY_NOTES,isTranscribing:false,isGeneratingNotes:false,participants:[],lastNotesAt:null,showNewMeetingModal:false,attentionAlerts:[],attentionDismissed:false,meetingType:''};
     default:return s;
   }
 }
@@ -786,7 +917,7 @@ const useApp=()=>useContext(Ctx);
 // ─── PROVIDER ────────────────────────────────────────────────────────────────
 function Provider({children}){
   const[s,d]=useReducer(reducer,init);
-  const timerRef=useRef(null),startRef=useRef(null),autoRef=useRef(null),finalAudioRef=useRef(null);
+  const timerRef=useRef(null),startRef=useRef(null),autoRef=useRef(null),finalAudioRef=useRef(null),axRef=useRef(null);
 
   useEffect(()=>{
     CryptoUtil.loadSettings().then(saved=>{
@@ -835,8 +966,14 @@ function Provider({children}){
         catch(e){Toast.warning('Mic: '+e.message);}
       }
       if(sources==='screen'||sources==='both'){
-        try{await AudioCapture.startScreenAudio();d({type:'SET_SCREEN',p:true});screenOk=true;}
-        catch(e){Toast.warning('Meeting audio: '+e.message);}
+        try{
+          await AudioCapture.startScreenAudio();
+          d({type:'SET_SCREEN',p:true});
+          screenOk=true;
+          // Start visual speaker detection from the screen video track
+          const vt=AudioCapture.getScreenVideoTrack();
+          SpeakerDetectionService.start(s.settings,vt);
+        }catch(e){Toast.warning('Meeting audio: '+e.message);}
       }
       if(!micOk&&!screenOk){d({type:'SET_REC_STATUS',p:'idle'});Toast.error('No audio source available. Check permissions.');return;}
       const _now=new Date(),_pad=n=>String(n).padStart(2,'0'),_defaultTitle=`Meeting — ${_now.getDate()} ${_now.toLocaleString('default',{month:'short'})} ${_now.getFullYear()} ${_pad(_now.getHours())}:${_pad(_now.getMinutes())}`;
@@ -850,8 +987,9 @@ function Provider({children}){
         AudioCapture.startRecording(
           async(blob,meta)=>{
             if(DB) DB.audioChunks.add({meetingId:id,chunkIndex:meta.chunkId,blob,startTime:meta.startTime,endTime:meta.endTime}).catch(e=>console.warn('DB audioChunks:',e));
-            // Auto-assign speaker from profile when mic is the source (mic-only or mic+screen)
-            const autoSpeaker=s.micActive&&s.settings.userName?s.settings.userName:'';
+            // Auto-assign speaker: prefer visual detection (screen share) over mic profile
+            const visualSpeaker=SpeakerDetectionService.getCurrentSpeaker();
+            const autoSpeaker=visualSpeaker||(s.micActive&&s.settings.userName?s.settings.userName:'');
             const entry={id:`c_${meta.chunkId}_${id}`,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:'Transcribing…',speaker:autoSpeaker};
             d({type:'ADD_CHUNK',p:entry});
             d({type:'SET_TRANSCRIBING',p:true});
@@ -860,7 +998,10 @@ function Provider({children}){
               const updated={...entry,text:r.text||'(no speech detected)'};
               d({type:'UPD_CHUNK',p:updated});
               sessionStore[id]?.transcript.push(updated);
-              if(DB) DB.transcripts.add({meetingId:id,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:r.text,speaker:autoSpeaker,language:r.language}).catch(e=>console.warn('DB transcripts:',e));
+              // Re-read speaker at save time in case detection updated between chunk start and transcription finish
+              const finalSpeaker=SpeakerDetectionService.getCurrentSpeaker()||autoSpeaker;
+              if(finalSpeaker&&finalSpeaker!==autoSpeaker) d({type:'UPD_CHUNK',p:{...updated,speaker:finalSpeaker}});
+              if(DB) DB.transcripts.add({meetingId:id,chunkId:meta.chunkId,startTime:meta.startTime,endTime:meta.endTime,text:r.text,speaker:finalSpeaker||autoSpeaker,language:r.language}).catch(e=>console.warn('DB transcripts:',e));
               // ── ATTENTION DETECTION ──────────────────────────────────────
               if(r.text){
                 const uName=(s.settings.userName||'').trim();
@@ -894,11 +1035,26 @@ function Provider({children}){
       }catch(e){d({type:'SET_REC_STATUS',p:'idle'});Toast.error(`Failed to start: ${e.message}`);}
     },
 
+    detectMeetingType:async()=>{
+      if(s.meetingType||s.transcriptChunks.length<3) return;
+      const sample=s.transcriptChunks.slice(0,6).map(c=>`${c.speaker?c.speaker+': ':''}${c.text}`).join('\n');
+      const result=await AzureChat.quick(s.settings,
+        `Analyze this meeting transcript excerpt and classify the meeting type. Return JSON: {"type":"TYPE"} where TYPE is exactly one of: Interview, Vendor Negotiation, Management Meeting, 1-on-1, Team Standup, Client Call, Training, All-Hands, Project Review, General. Choose the single best match.\n\nTranscript:\n${sample}`
+      );
+      if(result?.type&&result.type!=='General') d({type:'SET_MEETING_TYPE',p:result.type});
+    },
+    toggleMicMute:()=>{
+      const muted=!s.micMuted;
+      if(muted)AudioCapture.muteMic();else AudioCapture.unmuteMic();
+      d({type:'SET_MIC_MUTED',p:muted});
+      Toast.info(muted?'🔇 Mic muted — side conversations won\'t be transcribed':'🎙️ Mic unmuted — transcription resumed');
+    },
     pauseRecording:()=>{AudioCapture.pauseRecording();d({type:'SET_REC_STATUS',p:'paused'});Toast.info('Paused.');},
     resumeRecording:()=>{AudioCapture.resumeRecording();d({type:'SET_REC_STATUS',p:'recording'});Toast.info('Resumed.');},
 
     stopRecording:async()=>{
       d({type:'SET_REC_STATUS',p:'stopping'});
+      SpeakerDetectionService.stop();
       AudioCapture.stopRecording();
       const dur=s.recordingTimer;
       d({type:'END_MEETING',p:dur});
@@ -917,7 +1073,7 @@ function Provider({children}){
       d({type:'SET_GENERATING',p:true});
       try{
         const text=s.transcriptChunks.filter(c=>!c.text.startsWith('[')).map(c=>`${c.speaker?c.speaker+': ':''}${c.text}`).join('\n');
-        const notes=await AzureChat.generateNotes(text,s.settings,{title:s.currentMeeting?.title,template:s.currentMeeting?.template,participants:s.participants});
+        const notes=await AzureChat.generateNotes(text,s.settings,{title:s.currentMeeting?.title,template:s.currentMeeting?.template,participants:s.participants,meetingType:s.meetingType||''});
         d({type:'SET_NOTES',p:notes});
         if(s.currentMeeting&&sessionStore[s.currentMeeting.id])sessionStore[s.currentMeeting.id].notes=notes;
         if(s.currentMeeting&&DB) await DB.aiNotes.put({meetingId:s.currentMeeting.id,notes,generatedAt:Date.now(),isFinal}).catch(e=>console.warn('DB aiNotes:',e));
@@ -991,9 +1147,33 @@ function Provider({children}){
       d({type:'SET_VIEW',p:VIEWS.DETAIL});
     },
     deleteMeeting:async(id)=>{if(DB)await Promise.all([DB.meetings.delete(id),DB.transcripts.where('meetingId').equals(id).delete(),DB.audioChunks.where('meetingId').equals(id).delete(),DB.aiNotes.where('meetingId').equals(id).delete()]).catch(e=>console.warn('DB delete:',e));await ax.loadMeetings();Toast.success('Meeting deleted.');},
-    newRecording:()=>{AudioCapture.stopAll();d({type:'RESET'});d({type:'SET_VIEW',p:VIEWS.RECORDING});},
+    newRecording:()=>{SpeakerDetectionService.stop();AudioCapture.stopAll();d({type:'RESET'});d({type:'SET_VIEW',p:VIEWS.RECORDING});},
     exportMeeting:async(m,t,n)=>{const aRow=DB?await DB.audioChunks.where('meetingId').equals(m.id).first().catch(()=>null):null;await ExportService.exportZip(m,t,n,aRow?.blob||null);},
   };
+
+  // Keep axRef always pointing to fresh ax (avoids stale-closure in useEffects)
+  axRef.current=ax;
+
+  // ── Auto-generate notes + meeting type detection ─────────────────────────────
+  useEffect(()=>{
+    const n=s.transcriptChunks.length;
+    if(s.recordingStatus!=='recording') return;
+    // First notes: after 2 confirmed chunks
+    if(n===2&&!s.isGeneratingNotes) axRef.current?.generateNotes();
+    // Meeting type detection: after 3 chunks (run once)
+    if(n===3&&!s.meetingType) axRef.current?.detectMeetingType();
+  },[s.transcriptChunks.length]);
+
+  // ── Periodic auto-refresh during recording ───────────────────────────────────
+  useEffect(()=>{
+    if(s.recordingStatus!=='recording'){clearInterval(autoRef.current);autoRef.current=null;return;}
+    const ms=Math.max((parseInt(s.settings.autoGenerateInterval)||120)*1000,30000);
+    clearInterval(autoRef.current);
+    autoRef.current=setInterval(()=>{
+      if(!axRef.current?.isGeneratingNotes) axRef.current?.generateNotes();
+    },ms);
+    return()=>clearInterval(autoRef.current);
+  },[s.recordingStatus,s.settings.autoGenerateInterval]);
 
   return <Ctx.Provider value={{s,d,ax}}>{children}</Ctx.Provider>;
 }
@@ -1775,6 +1955,17 @@ function RecordingControls({onNewMeeting}){
       )}
       {isRec&&(
         <>
+          {s.micActive&&(
+            <button
+              className={`btn btn-sm ${s.micMuted?'btn-primary attention-pulse':'btn-ghost'}`}
+              onClick={ax.toggleMicMute}
+              title={s.micMuted?'Unmute mic — resume transcription':'Mute mic (phone call, side conversation)'}
+              style={s.micMuted?{border:'1px solid #ef4444',color:'#fca5a5',background:'rgba(239,68,68,.15)',animationDuration:'1.2s'}:{}}
+            >
+              <Ic n={s.micMuted?'mic-off':'mic'} sz={14}/>
+              {s.micMuted?' Unmuted':' Mute Mic'}
+            </button>
+          )}
           <button className="btn btn-secondary" onClick={ax.pauseRecording}><Ic n="pause" sz={16}/> Pause</button>
           <button className="btn btn-danger" onClick={ax.stopRecording}><Ic n="stop" sz={14}/> Stop</button>
         </>
@@ -2279,8 +2470,10 @@ function RecordingStudio(){
                   <span style={{fontSize:'18px'}}>{TEMPLATES[s.currentMeeting.template]?.icon||'📋'}</span>
                   <span style={{fontSize:'.875rem',fontWeight:'600',color:'var(--txt)',maxWidth:280,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.currentMeeting.title}</span>
                   {/* Active source pills */}
-                  {s.micActive&&<span style={{background:'rgba(16,185,129,.1)',border:'1px solid rgba(16,185,129,.3)',color:'#34d399',padding:'2px 9px',borderRadius:'999px',fontSize:'.72rem',fontWeight:'600',flexShrink:0}}>Mic</span>}
+                  {s.micActive&&!s.micMuted&&<span style={{background:'rgba(16,185,129,.1)',border:'1px solid rgba(16,185,129,.3)',color:'#34d399',padding:'2px 9px',borderRadius:'999px',fontSize:'.72rem',fontWeight:'600',flexShrink:0}}>Mic</span>}
+                  {s.micActive&&s.micMuted&&<span style={{background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.3)',color:'#fca5a5',padding:'2px 9px',borderRadius:'999px',fontSize:'.72rem',fontWeight:'600',flexShrink:0}}>🔇 Mic Muted</span>}
                   {s.screenAudioActive&&<span style={{background:'rgba(16,185,129,.1)',border:'1px solid rgba(16,185,129,.3)',color:'#34d399',padding:'2px 9px',borderRadius:'999px',fontSize:'.72rem',fontWeight:'600',flexShrink:0}}>Meeting Audio</span>}
+                  {s.meetingType&&<span style={{background:'rgba(99,102,241,.1)',border:'1px solid rgba(99,102,241,.3)',color:'#818cf8',padding:'2px 9px',borderRadius:'999px',fontSize:'.72rem',fontWeight:'600',flexShrink:0,display:'flex',alignItems:'center',gap:'4px'}}><Ic n="sparkle" sz={10}/>{s.meetingType}</span>}
                 </div>
               )}
               <RecordingControls onNewMeeting={()=>setShowModal(true)}/>
